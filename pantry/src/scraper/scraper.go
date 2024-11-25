@@ -3,14 +3,11 @@ package scraper
 import (
 	"fmt"
 	"net/http"
+	"search-engine-indexer/src/variables"
 	"slices"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
-)
-
-var (
-	titles = make([]string, 0)
 )
 
 // Scraper for each website
@@ -84,15 +81,15 @@ func (s *Scraper) Links() ([]string, []string) {
 		if strings.Contains(href, "/cooking/recipe-ideas") || strings.Contains(href, "/everyday-cooking/quick-and-easy/") || strings.Contains(href, "/search?q=Chicken") || strings.Contains(href, "/search?q=Tacos") {
 			if !strings.HasPrefix(href, "#") && !strings.HasPrefix(href, "javascript") {
 				link = s.buildLinks(href)
-				if link != "" && !slices.Contains(titles, title) && !slices.Contains(links, link) {
+				if link != "" && !slices.Contains(variables.Titles, title) && !slices.Contains(links, link) {
 					links = append(links, link)
-					titles = append(titles, title)
+					variables.Titles = append(variables.Titles, title)
 				}
 			}
 		}
 	})
 
-	return links, titles
+	return links, variables.Titles
 }
 
 // MetaDataInformation returns the title and description from the page

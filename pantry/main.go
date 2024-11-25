@@ -2,13 +2,14 @@ package main
 
 import (
 	"fmt"
+	"github.com/teris-io/shortid"
 	"os"
 	"search-engine-indexer/src/elasticsearch"
+	"search-engine-indexer/src/logger"
 	"search-engine-indexer/src/scraper"
 	"search-engine-indexer/src/structs"
+	"slices"
 	"sync"
-
-	"github.com/teris-io/shortid"
 )
 
 var queue = make(chan string)
@@ -20,51 +21,57 @@ func crawlURL(url string) {
 		return
 	}
 
-	links, _ := s.Links()
+	links, titles := s.Links()
 	fmt.Println(links)
 	title, description := s.MetaDataInformation()
 	body := s.Body()
 
-	// Check if the page exists
-	existsLink, page := elasticsearch.ExistingPage(url)
+	if !slices.Contains(titles, title) {
+		fmtdString := fmt.Sprintf("Title: %s;\n Description: %s;\n", title, description)
 
-	if existsLink {
-		// Update the page in database
-		params := map[string]interface{}{
-			"title":       title,
-			"description": description,
-			"body":        body,
+		logger.WriteInfo(fmtdString)
+
+		// Check if the page exists
+		existsLink, page := elasticsearch.ExistingPage(url)
+
+		if existsLink {
+			// Update the page in database
+			params := map[string]interface{}{
+				"title":       title,
+				"description": description,
+				"body":        body,
+			}
+
+			success := elasticsearch.UpdatePage(page.ID, params)
+			if !success {
+				return
+			}
+
+			fmt.Println("Page", url, "with ID", page.ID, "update")
+		} else {
+			// Create the new page in the database
+			id, _ := shortid.Generate()
+			newPage := structs.Page{
+				ID:          id,
+				Title:       title,
+				Description: description,
+				Body:        body,
+				URL:         url,
+			}
+
+			success := elasticsearch.CreatePage(newPage)
+			if !success {
+				return
+			}
+
+			fmt.Println("Page", url, "created")
 		}
 
-		success := elasticsearch.UpdatePage(page.ID, params)
-		if !success {
-			return
+		for _, link := range links {
+			go func(l string) {
+				queue <- l
+			}(link)
 		}
-
-		fmt.Println("Page", url, "with ID", page.ID, "update")
-	} else {
-		// Create the new page in the database
-		id, _ := shortid.Generate()
-		newPage := structs.Page{
-			ID:          id,
-			Title:       title,
-			Description: description,
-			Body:        body,
-			URL:         url,
-		}
-
-		success := elasticsearch.CreatePage(newPage)
-		if !success {
-			return
-		}
-
-		fmt.Println("Page", url, "created")
-	}
-
-	for _, link := range links {
-		go func(l string) {
-			queue <- l
-		}(link)
 	}
 }
 
