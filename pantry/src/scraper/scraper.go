@@ -3,8 +3,8 @@ package scraper
 import (
 	"fmt"
 	"net/http"
+	"search-engine-indexer/src/logger"
 	"search-engine-indexer/src/variables"
-	"slices"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -66,7 +66,7 @@ func (s *Scraper) buildLinks(href string) string {
 }
 
 // Links returns an array with all the links from the website
-func (s *Scraper) Links() ([]string, []string) {
+func (s *Scraper) Links() []string {
 	links := make([]string, 0)
 
 	var link string
@@ -81,7 +81,7 @@ func (s *Scraper) Links() ([]string, []string) {
 		if strings.Contains(href, "/cooking/recipe-ideas") || strings.Contains(href, "/everyday-cooking/quick-and-easy/") || strings.Contains(href, "/search?q=Chicken") || strings.Contains(href, "/search?q=Tacos") {
 			if !strings.HasPrefix(href, "#") && !strings.HasPrefix(href, "javascript") {
 				link = s.buildLinks(href)
-				if link != "" && !slices.Contains(variables.Titles, title) && !slices.Contains(links, link) {
+				if link != "" {
 					links = append(links, link)
 					variables.Titles = append(variables.Titles, title)
 				}
@@ -89,7 +89,10 @@ func (s *Scraper) Links() ([]string, []string) {
 		}
 	})
 
-	return links, variables.Titles
+	fmtdString := fmt.Sprintf("Current Varaibles --> %s", variables.Titles)
+	logger.WriteInfo(fmtdString)
+
+	return links
 }
 
 // MetaDataInformation returns the title and description from the page

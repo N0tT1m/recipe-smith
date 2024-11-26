@@ -8,11 +8,35 @@ import (
 	"search-engine-indexer/src/logger"
 	"search-engine-indexer/src/scraper"
 	"search-engine-indexer/src/structs"
-	"slices"
+	"strings"
 	"sync"
 )
 
 var queue = make(chan string)
+
+func removeDuplicates(strs []string) []string {
+	// Create a map to track first occurrence indices
+	seen := make(map[string]int)
+
+	// First pass: record the first occurrence of each string
+	for i, s := range strs {
+		if _, exists := seen[s]; !exists {
+			seen[s] = i
+		}
+	}
+
+	// Create result slice
+	result := make([]string, 0, len(seen))
+
+	// Keep only the first occurrence of each string
+	for i, s := range strs {
+		if seen[s] == i {
+			result = append(result, s)
+		}
+	}
+
+	return result
+}
 
 func crawlURL(url string) {
 	// Extract links, title and description
@@ -21,51 +45,66 @@ func crawlURL(url string) {
 		return
 	}
 
-	links, titles := s.Links()
+	var joinedUrl string
+	var newLinks []string
+
+	links := s.Links()
 	fmt.Println(links)
 	title, description := s.MetaDataInformation()
 	body := s.Body()
 
-	if !slices.Contains(titles, title) {
-		fmtdString := fmt.Sprintf("Title: %s;\n Description: %s;\n", title, description)
+	fmtdString := fmt.Sprintf("Title: %s", title)
+	logger.WriteInfo(fmtdString)
 
+	fmt.Println(url)
+
+	for _, link := range links {
+		splitUrl := strings.Split(link, "/")
+
+		splitUrl = removeDuplicates(splitUrl)
+
+		joinedUrl = strings.Join(splitUrl, "/")
+
+		fmtdString = fmt.Sprintf("Url being used: %s", joinedUrl)
 		logger.WriteInfo(fmtdString)
 
-		// Check if the page exists
-		existsLink, page := elasticsearch.ExistingPage(url)
+		newLinks = append(newLinks, link)
+	}
 
-		if existsLink {
-			// Update the page in database
-			params := map[string]interface{}{
-				"title":       title,
-				"description": description,
-				"body":        body,
-			}
+	// Check if the page exists
+	existsLink, page := elasticsearch.ExistingPage(joinedUrl)
 
-			success := elasticsearch.UpdatePage(page.ID, params)
-			if !success {
-				return
-			}
-
-			fmt.Println("Page", url, "with ID", page.ID, "update")
-		} else {
-			// Create the new page in the database
-			id, _ := shortid.Generate()
-			newPage := structs.Page{
-				ID:          id,
-				Title:       title,
-				Description: description,
-				Body:        body,
-				URL:         url,
-			}
-
-			success := elasticsearch.CreatePage(newPage)
-			if !success {
-				return
-			}
-
-			fmt.Println("Page", url, "created")
+	if existsLink {
+		// Update the page in database
+		params := map[string]interface{}{
+			"title":       title,
+			"description": description,
+			"body":        body,
 		}
+
+		success := elasticsearch.UpdatePage(page.ID, params)
+		if !success {
+			return
+		}
+
+		fmt.Println("Page", joinedUrl, "with ID", page.ID, "update")
+	} else {
+		// Create the new page in the database
+		id, _ := shortid.Generate()
+		newPage := structs.Page{
+			ID:          id,
+			Title:       title,
+			Description: description,
+			Body:        body,
+			URL:         joinedUrl,
+		}
+
+		success := elasticsearch.CreatePage(newPage)
+		if !success {
+			return
+		}
+
+		fmt.Println("Page", url, "created")
 
 		for _, link := range links {
 			go func(l string) {

@@ -59,5 +59,5 @@ func main() {
 
 	mux.HandleFunc("/", homeHandler).Methods("GET")
 	mux.HandleFunc("/search", searchHandler).Methods("GET")
-	http.ListenAndServe(":8080", mux)
+	http.ListenAndServe(":80", mux)
 }
