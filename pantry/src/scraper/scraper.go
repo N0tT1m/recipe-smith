@@ -66,7 +66,7 @@ func (s *Scraper) buildLinks(href string) string {
 }
 
 // Links returns an array with all the links from the website
-func (s *Scraper) Links() []string {
+func (s *Scraper) Links() ([]string, []string) {
 	links := make([]string, 0)
 
 	var link string
@@ -89,10 +89,10 @@ func (s *Scraper) Links() []string {
 		}
 	})
 
-	fmtdString := fmt.Sprintf("Current Varaibles --> %s", variables.Titles)
+	fmtdString := fmt.Sprintf("Current Varaibles --> %s", variables.Titles[1], variables.Titles[2])
 	logger.WriteInfo(fmtdString)
 
-	return links
+	return links, variables.Titles
 }
 
 // MetaDataInformation returns the title and description from the page
