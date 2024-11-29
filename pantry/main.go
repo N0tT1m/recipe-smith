@@ -8,8 +8,6 @@ import (
 	"search-engine-indexer/src/logger"
 	"search-engine-indexer/src/scraper"
 	"search-engine-indexer/src/structs"
-	"slices"
-	"strings"
 	"sync"
 )
 
@@ -46,10 +44,7 @@ func crawlURL(url string) {
 		return
 	}
 
-	var joinedUrl string
-	var newLinks []string
-
-	links, titles := s.Links()
+	links := s.Links()
 	fmt.Println(links)
 	title, description := s.MetaDataInformation()
 	body := s.Body()
@@ -57,64 +52,44 @@ func crawlURL(url string) {
 	fmtdString := fmt.Sprintf("Title: %s", title)
 	logger.WriteInfo(fmtdString)
 
-	fmt.Println(url)
+	// Check if the page exists
+	existsLink, page := elasticsearch.ExistingPage(title)
 
-	if !slices.Contains(titles, title) {
-		for _, link := range links {
-			splitUrl := strings.Split(link, "/")
-
-			splitUrl = removeDuplicates(splitUrl)
-
-			joinedUrl = strings.Join(splitUrl, "/")
-
-			fmtdString = fmt.Sprintf("Url being used: %s", joinedUrl)
-			logger.WriteInfo(fmtdString)
-
-			newLinks = append(newLinks, link)
+	if existsLink {
+		// Update the page in database
+		params := map[string]interface{}{
+			"title":       title,
+			"description": description,
+			"body":        body,
 		}
 
-		// Check if the page exists
-		existsLink, page := elasticsearch.ExistingPage(joinedUrl)
+		success := elasticsearch.UpdatePage(page.ID, params)
 
-		if existsLink {
-			// Update the page in database
-			params := map[string]interface{}{
-				"title":       title,
-				"description": description,
-				"body":        body,
-			}
-
-			success := elasticsearch.UpdatePage(page.ID, params)
-			if !success {
-				return
-			}
-
-			titles = append(titles, title)
-
-			fmt.Println("Page", joinedUrl, "with ID", page.ID, "update")
-		} else {
-			// Create the new page in the database
-			id, _ := shortid.Generate()
-			newPage := structs.Page{
-				ID:          id,
-				Title:       title,
-				Description: description,
-				Body:        body,
-				URL:         joinedUrl,
-			}
-
-			success := elasticsearch.CreatePage(newPage)
-			if !success {
-				return
-			}
-
-			titles = append(titles, title)
-
-			fmt.Println("Page", url, "created")
+		if !success {
+			return
 		}
+
+		fmt.Println("Page", title, "with ID", page.ID, "update")
+	} else {
+		// Create the new page in the database
+		id, _ := shortid.Generate()
+		newPage := structs.Page{
+			ID:          id,
+			Title:       title,
+			Description: description,
+			Body:        body,
+			URL:         url,
+		}
+
+		success := elasticsearch.CreatePage(newPage)
+		if !success {
+			return
+		}
+
+		fmt.Println("Page", url, "created")
 	}
 
-	for _, link := range newLinks {
+	for _, link := range links {
 		go func(l string) {
 			queue <- l
 		}(link)
