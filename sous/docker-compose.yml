@@ -1,0 +1,33 @@
+version: '3'
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch-oss:6.2.4
+    ports:
+      - 9200:9200
+      - 9300:9300
+    environment:
+      - discovery.type=single-node
+
+  web1:
+    image: search_engine_client
+    depends_on:
+      - elasticsearch
+
+  web2:
+    image: search_engine_client
+    depends_on:
+      - elasticsearch
+
+  indexer:
+    image: search_engine_indexer
+    depends_on:
+      - elasticsearch
+
+  haproxy:
+    build: ./haproxy
+    ports:
+        - 8080:8080
+    depends_on:
+      - web1
+      - web2

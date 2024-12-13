@@ -1,0 +1,1 @@
+flutter build ipa --obfuscate --split-debug-info=/Volumes/ExternalHd/workspace/cookbook --release
