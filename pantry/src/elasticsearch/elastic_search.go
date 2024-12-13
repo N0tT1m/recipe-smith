@@ -137,6 +137,8 @@ func ExistingPage(title string) (bool, structs.Page) {
 	// Normalize the title before searching
 	normalizedTitle := normalizeTitle(title)
 
+	logger.WriteInfo(normalizedTitle)
+
 	// Use BoolQuery with MatchPhraseQuery for exact matching
 	q := elastic.NewBoolQuery().
 		Must(elastic.NewMatchPhraseQuery("title", normalizedTitle))
@@ -229,6 +231,35 @@ func isValidDelishURL(rawURL string) bool {
 	return true
 }
 
+// existingTitle checks if a Title already exists in the database
+func existingTitle(client *elastic.Client, indexName string, title string) bool {
+	ctx := context.Background()
+
+	q := elastic.NewBoolQuery().
+		Must(elastic.NewMatchQuery("title", title))
+
+	// Execute the search
+	result, err := client.Search().Index(indexName).Query(q).Size(25).Do(ctx)
+	if err != nil {
+		logger.WriteWarning(fmt.Sprintf("Failed to check for existing URL: %v", err))
+		return false
+	}
+
+	// Log the search results for debugging
+	hits := result.TotalHits()
+	if hits > 0 {
+		logger.WriteInfo(fmt.Sprintf("Found %d existing entries for Title: %s", hits, title))
+		// Log the first matching document
+		var page structs.Page
+		if err := json.Unmarshal(result.Hits.Hits[0].Source, &page); err == nil {
+			logger.WriteInfo(fmt.Sprintf("Existing page details - ID: %s, Title: %s", page.ID, page.Title))
+		}
+		return true
+	}
+
+	return false
+}
+
 // existingURL checks if a URL already exists in the database
 func existingURL(client *elastic.Client, indexName string, urlToCheck string) bool {
 	ctx := context.Background()
@@ -241,7 +272,7 @@ func existingURL(client *elastic.Client, indexName string, urlToCheck string) bo
 	result, err := client.Search().
 		Index(indexName).
 		Query(q).
-		Size(1).
+		Size(25).
 		Do(ctx)
 
 	if err != nil {
@@ -285,6 +316,11 @@ func CreatePage(p structs.Page) bool {
 	// Check if URL already exists - do this check first before anything else
 	if existingURL(client, IndexName, p.URL) {
 		logger.WriteWarning(fmt.Sprintf("URL already exists in database, skipping creation: %s", p.URL))
+		return false
+	}
+
+	if existingTitle(client, IndexName, p.Title) {
+		logger.WriteWarning(fmt.Sprintf("Title already exists in database, skipping creation: %s", p.Title))
 		return false
 	}
 
@@ -364,6 +400,13 @@ func UpdatePage(id string, params map[string]interface{}) bool {
 			logger.WriteInfo(fmt.Sprintf("Checking if new URL exists: %s", url))
 			if existingURL(client, IndexName, url) {
 				logger.WriteWarning(fmt.Sprintf("URL already exists in another document, skipping update: %s", url))
+				return false
+			}
+		}
+		if currentPage.Title != params["title"].(string) {
+			logger.WriteInfo(fmt.Sprintf("Checking if new Title exists: %s", url))
+			if existingTitle(client, IndexName, params["title"].(string)) {
+				logger.WriteWarning(fmt.Sprintf("Title already exists in another document, skipping update: %s", params["title"].(string)))
 				return false
 			}
 		}

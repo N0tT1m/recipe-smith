@@ -33,7 +33,7 @@ func GetSeverityString(logType LogSeverity) string {
 }
 
 func write(logType LogSeverity, message interface{}) {
-	f, err := os.OpenFile("high-seas.log", os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
+	f, err := os.OpenFile("pantry.log", os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
 	if err != nil {
 		log.Fatalf("Error opening file: %v", err)
 	}
@@ -58,7 +58,7 @@ func WriteInfo(message interface{}) {
 }
 
 func WriteFatal(errMsg string, err error) {
-	f, err := os.OpenFile("high-seas.log", os.O_WRONLY|os.O_CREATE, 0755)
+	f, err := os.OpenFile("pantry.log", os.O_WRONLY|os.O_CREATE, 0755)
 	if err != nil {
 
 	}
@@ -76,7 +76,7 @@ func WriteFatal(errMsg string, err error) {
 }
 
 func WriteCMDInfo(cmd string, output string) {
-	f, err := os.OpenFile("high-seas.log", os.O_WRONLY|os.O_CREATE, 0755)
+	f, err := os.OpenFile("pantry.log", os.O_WRONLY|os.O_CREATE, 0755)
 	if err != nil {
 		WriteError("Couldn't open file.", err)
 	}

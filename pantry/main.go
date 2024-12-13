@@ -7,7 +7,6 @@ import (
 	"search-engine-indexer/src/elasticsearch"
 	"search-engine-indexer/src/logger"
 	"search-engine-indexer/src/scraper"
-	"search-engine-indexer/src/structs"
 	"sync"
 )
 
@@ -56,21 +55,6 @@ func crawlURL(url string) {
 	existsLink, page := elasticsearch.ExistingPage(title)
 
 	if existsLink {
-		// Update the page in database
-		params := map[string]interface{}{
-			"title":       title,
-			"description": description,
-			"body":        body,
-		}
-
-		success := elasticsearch.UpdatePage(page.ID, params)
-
-		if !success {
-			return
-		}
-
-		fmt.Println("Page", title, "with ID", page.ID, "update")
-	} else {
 		// Create the new page in the database
 		id, _ := shortid.Generate()
 		newPage := structs.Page{
@@ -87,6 +71,21 @@ func crawlURL(url string) {
 		}
 
 		fmt.Println("Page", url, "created")
+	} else {
+		// Update the page in database
+		params := map[string]interface{}{
+			"title":       title,
+			"description": description,
+			"body":        body,
+		}
+
+		success := elasticsearch.UpdatePage(page.ID, params)
+
+		if !success {
+			return
+		}
+
+		fmt.Println("Page", title, "with ID", page.ID, "update")
 	}
 
 	for _, link := range links {
