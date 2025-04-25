@@ -8,7 +8,6 @@ import (
 	"log"
 	"math"
 	"net/url"
-	"reflect"
 	"regexp"
 	"search-engine-indexer/src/logger"
 	"search-engine-indexer/src/structs"
@@ -125,23 +124,30 @@ func NewElasticSearchClient() *elastic.Client {
 	var err error
 	connected := false
 	retries := 0
+	maxRetries := 10
+	retryDelay := 5 * time.Second
 
 	// Custom retry strategy for docker-compose initialization
-	for connected == false {
+	for connected == false && retries < maxRetries {
 		// Create a new elastic client
 		client, err = elastic.NewClient(
-			elastic.SetURL("http://192.168.1.78:9200"), elastic.SetSniff(false))
+			elastic.SetURL("http://192.168.1.78:9200"),
+			elastic.SetSniff(false),
+			elastic.SetHealthcheck(true),
+			elastic.SetHealthcheckTimeout(20*time.Second),
+			elastic.SetRetrier(elastic.NewBackoffRetrier(elastic.NewExponentialBackoff(100*time.Millisecond, 5*time.Second))),
+		)
 		if err != nil {
-			// log.Fatal(err)
-			if retries == 5 {
-				log.Fatal(err)
-			}
-			fmt.Println("Elasticsearch isn't ready for connection", 5-retries, "less")
+			logger.WriteWarning(fmt.Sprintf("Failed to connect to Elasticsearch (attempt %d/%d): %v", retries+1, maxRetries, err))
 			retries++
-			time.Sleep(3 * time.Second)
+			time.Sleep(retryDelay)
 		} else {
 			connected = true
 		}
+	}
+
+	if !connected {
+		log.Fatalf("Failed to connect to Elasticsearch after %d attempts", maxRetries)
 	}
 
 	// Getting the ES version number is quite common, so there's a shortcut
@@ -150,7 +156,7 @@ func NewElasticSearchClient() *elastic.Client {
 		// Handle error
 		panic(err)
 	}
-	fmt.Printf("Elasticsearch version %s\n", esversion)
+	logger.WriteInfo(fmt.Sprintf("Connected to Elasticsearch version %s", esversion))
 
 	return client
 }
@@ -160,7 +166,8 @@ func ExistsIndex(i string) bool {
 	// Check if index exists
 	exists, err := client.IndexExists(i).Do(context.TODO())
 	if err != nil {
-		log.Fatal(err)
+		logger.WriteError(fmt.Sprintf("Error checking if index exists: %v", err))
+		return false
 	}
 
 	return exists
@@ -172,12 +179,15 @@ func CreateIndex(i string) {
 		Body(IndexMapping).
 		Do(context.Background())
 	if err != nil {
-		log.Fatal(err)
+		logger.WriteError(fmt.Sprintf("Failed to create index: %v", err))
+		return
 	}
 
 	if !createIndex.Acknowledged {
-		log.Println("CreateIndex was not acknowledged. Check that timeout value is correct.")
+		logger.WriteWarning("CreateIndex was not acknowledged. Check that timeout value is correct.")
 	}
+
+	logger.WriteInfo(fmt.Sprintf("Created index %s successfully", i))
 }
 
 // DeleteIndex in the indexName constant
@@ -186,12 +196,13 @@ func DeleteIndex() {
 	deleteIndex, err := client.DeleteIndex(IndexName).Do(ctx)
 	if err != nil {
 		// Handle error
-		log.Fatal(err)
+		logger.WriteError(fmt.Sprintf("Failed to delete index: %v", err))
+		return
 	}
 	if !deleteIndex.Acknowledged {
-		log.Println("DeleteIndex was not acknowledged. Check that timeout value is correct.")
+		logger.WriteWarning("DeleteIndex was not acknowledged. Check that timeout value is correct.")
 	}
-	fmt.Println("Index", IndexName, "deleted")
+	logger.WriteInfo(fmt.Sprintf("Index %s deleted", IndexName))
 }
 
 // ExistingPage return a boolean and a page if the title is already
@@ -205,29 +216,44 @@ func ExistingPage(title string) (bool, structs.Page) {
 	// Normalize the title before searching
 	normalizedTitle := normalizeTitle(title)
 
-	logger.WriteInfo(normalizedTitle)
+	logger.WriteInfo(fmt.Sprintf("Searching for existing page with title: %s", normalizedTitle))
 
 	// Use BoolQuery with MatchPhraseQuery for exact matching
 	q := elastic.NewBoolQuery().
-		Must(elastic.NewMatchPhraseQuery("title", normalizedTitle))
+		Should(
+			elastic.NewMatchPhraseQuery("title", normalizedTitle).Boost(2),
+			elastic.NewMatchQuery("title", normalizedTitle).Fuzziness("2"),
+		).
+		MinimumShouldMatch("1")
 
 	result, err := client.Search().
 		Index(IndexName).
 		Query(q).
-		Size(1).
+		Size(5).
 		Do(ctx)
 
 	if err != nil {
-		logger.WriteError("Failed to search for page:", err)
+		logger.WriteError(fmt.Sprintf("Failed to search for page: %v", err))
 		return false, p
 	}
 
+	// Set a similarity threshold for considering a page a match
+	similarityThreshold := 0.8
+
 	var ttyp structs.Page
-	for _, item := range result.Each(reflect.TypeOf(ttyp)) {
-		page := item.(structs.Page)
-		// Compare normalized titles
-		if normalizeTitle(page.Title) == normalizedTitle {
-			exists, p = true, page
+	for _, hit := range result.Hits.Hits {
+		if err := json.Unmarshal(hit.Source, &ttyp); err != nil {
+			logger.WriteError(fmt.Sprintf("Failed to unmarshal page: %v", err))
+			continue
+		}
+
+		// Calculate title similarity
+		similarity := calculateTitleSimilarity(title, ttyp.Title)
+		logger.WriteInfo(fmt.Sprintf("Title similarity: %.2f for '%s' vs '%s'", similarity, title, ttyp.Title))
+
+		// If similarity is above threshold, consider it a match
+		if similarity >= similarityThreshold {
+			exists, p = true, ttyp
 			return exists, p
 		}
 	}
@@ -240,12 +266,23 @@ func normalizeTitle(title string) string {
 	// Remove extra whitespace and convert to lowercase
 	normalized := strings.TrimSpace(strings.ToLower(title))
 
-	// Split into words and rejoin to ensure consistent spacing
-	words := strings.Fields(normalized)
-	return strings.Join(words, " ")
+	// Remove common recipe prefixes/suffixes
+	normalized = strings.ReplaceAll(normalized, "recipe", "")
+	normalized = strings.ReplaceAll(normalized, "best", "")
+	normalized = strings.ReplaceAll(normalized, "easy", "")
+	normalized = strings.ReplaceAll(normalized, "homemade", "")
+	normalized = strings.ReplaceAll(normalized, "the best", "")
+
+	// Remove special characters
+	normalized = regexp.MustCompile(`[^\w\s]`).ReplaceAllString(normalized, " ")
+
+	// Replace multiple spaces with a single space
+	normalized = regexp.MustCompile(`\s+`).ReplaceAllString(normalized, " ")
+
+	return strings.TrimSpace(normalized)
 }
 
-// Replace isValidDelishURL with a more generic function
+// isValidRecipeURL checks if a URL is a valid recipe URL
 func isValidRecipeURL(rawURL string) bool {
 	// List of allowed recipe domains
 	allowedDomains := []string{
@@ -278,7 +315,7 @@ func isValidRecipeURL(rawURL string) bool {
 
 	// Map of domain-specific validation patterns
 	validPathPatterns := map[string][]string{
-		"www.delish.com":        {"/cooking/recipe-ideas/", "/everyday-cooking/quick-and-easy/"},
+		"www.delish.com":        {"/cooking/recipe-ideas/", "/recipe/", "/recipes/"},
 		"www.allrecipes.com":    {"/recipe/", "/recipes/"},
 		"www.foodnetwork.com":   {"/recipes/", "/recipe/"},
 		"www.epicurious.com":    {"/recipes/", "/recipe/"},
@@ -302,77 +339,13 @@ func isValidRecipeURL(rawURL string) bool {
 	return false
 }
 
-// Add this function to elasticsearch/elasticsearch.go
-func normalizeRecipeTitle(title string) string {
-	// Convert to lowercase
-	normalized := strings.ToLower(title)
-
-	// Remove common recipe title patterns
-	normalized = strings.ReplaceAll(normalized, "recipe", "")
-	normalized = strings.ReplaceAll(normalized, "best", "")
-	normalized = strings.ReplaceAll(normalized, "easy", "")
-	normalized = strings.ReplaceAll(normalized, "homemade", "")
-
-	// Remove special characters and extra spaces
-	normalized = regexp.MustCompile(`[^\w\s]`).ReplaceAllString(normalized, " ")
-	normalized = regexp.MustCompile(`\s+`).ReplaceAllString(normalized, " ")
-
-	return strings.TrimSpace(normalized)
-}
-
-// Improve the existingTitle function
-func existingTitle(client *elastic.Client, indexName string, title string) bool {
-	ctx := context.Background()
-
-	// Normalize the title for comparison
-	normalizedTitle := normalizeRecipeTitle(title)
-
-	// Use fuzzy matching for better duplicate detection
-	q := elastic.NewBoolQuery().
-		Should(
-			elastic.NewMatchPhraseQuery("title", title).Boost(2),
-			elastic.NewMatchQuery("title", normalizedTitle).Fuzziness("2"),
-		).
-		MinimumShouldMatch("1")
-
-	// Execute the search
-	result, err := client.Search().
-		Index(indexName).
-		Query(q).
-		Size(5).
-		Do(ctx)
-
-	if err != nil {
-		logger.WriteWarning(fmt.Sprintf("Failed to check for existing title: %v", err))
-		return false
-	}
-
-	// Check if any results exceed our similarity threshold
-	if result.TotalHits() > 0 {
-		// Log the potential duplicates
-		for _, hit := range result.Hits.Hits {
-			var page structs.Page
-			if err := json.Unmarshal(hit.Source, &page); err == nil {
-				similarity := calculateTitleSimilarity(title, page.Title)
-				if similarity > 0.7 { // Threshold for considering it a duplicate
-					logger.WriteInfo(fmt.Sprintf("Found duplicate title (%.2f similarity): %s", similarity, page.Title))
-					return true
-				}
-			}
-		}
-	}
-
-	return false
-}
-
-// Add a function to calculate title similarity
+// calculateTitleSimilarity calculates the similarity between two titles
 func calculateTitleSimilarity(title1, title2 string) float64 {
 	// Normalize both titles
-	norm1 := normalizeRecipeTitle(title1)
-	norm2 := normalizeRecipeTitle(title2)
+	norm1 := normalizeTitle(title1)
+	norm2 := normalizeTitle(title2)
 
 	// Simple Levenshtein distance calculation
-	// (In a real implementation, you might want to use a proper string similarity library)
 	distance := levenshteinDistance(norm1, norm2)
 	maxLength := math.Max(float64(len(norm1)), float64(len(norm2)))
 
@@ -385,10 +358,6 @@ func calculateTitleSimilarity(title1, title2 string) float64 {
 
 // Levenshtein distance implementation
 func levenshteinDistance(s1, s2 string) int {
-	// Implementation of the algorithm (simplified version)
-	// In a real app, use a library for this
-
-	// Simple implementation for example purposes
 	if len(s1) == 0 {
 		return len(s2)
 	}
@@ -433,7 +402,7 @@ func min(a, b int) int {
 }
 
 // existingURL checks if a URL already exists in the database
-func existingURL(client *elastic.Client, indexName string, urlToCheck string) bool {
+func existingURL(urlToCheck string) bool {
 	ctx := context.Background()
 
 	// Create a bool query to check for exact URL match
@@ -442,9 +411,9 @@ func existingURL(client *elastic.Client, indexName string, urlToCheck string) bo
 
 	// Execute the search
 	result, err := client.Search().
-		Index(indexName).
+		Index(IndexName).
 		Query(q).
-		Size(25).
+		Size(1).
 		Do(ctx)
 
 	if err != nil {
@@ -452,85 +421,9 @@ func existingURL(client *elastic.Client, indexName string, urlToCheck string) bo
 		return false
 	}
 
-	// Log the search results for debugging
+	// Check if any results were found
 	hits := result.TotalHits()
-	if hits > 0 {
-		logger.WriteInfo(fmt.Sprintf("Found %d existing entries for URL: %s", hits, urlToCheck))
-		// Log the first matching document
-		var page structs.Page
-		if err := json.Unmarshal(result.Hits.Hits[0].Source, &page); err == nil {
-			logger.WriteInfo(fmt.Sprintf("Existing page details - ID: %s, Title: %s", page.ID, page.Title))
-		}
-		return true
-	}
-
-	return false
-}
-
-// Update the CreatePage function to handle recipe fields
-func CreatePage(p structs.Page) bool {
-	ctx := context.Background()
-
-	// Convert relative URL to absolute if needed
-	if strings.HasPrefix(p.URL, "/") {
-		// Extract domain from context or use a default one
-		domain := extractDomainFromURL(p.URL)
-		if domain == "" {
-			domain = "https://www.example.com" // Fallback
-		}
-		p.URL = domain + p.URL
-	}
-
-	// Validate URL format for any supported recipe site
-	if !isValidRecipeURL(p.URL) {
-		logger.WriteWarning(fmt.Sprintf("Invalid recipe URL format: %s", p.URL))
-		return false
-	}
-
-	// Set source site from URL
-	p.SourceSite = extractSourceSite(p.URL)
-
-	// Set crawl date to current time
-	p.CrawlDate = time.Now()
-
-	// If name isn't set, use the title
-	if p.Name == "" {
-		p.Name = p.Title
-	}
-
-	// Check if URL already exists
-	if existingURL(client, IndexName, p.URL) {
-		logger.WriteWarning(fmt.Sprintf("URL already exists in database: %s", p.URL))
-		return false
-	}
-
-	// Check if the title is a duplicate (using improved detection)
-	if existingTitle(client, IndexName, p.Title) {
-		logger.WriteWarning(fmt.Sprintf("Similar title already exists: %s", p.Title))
-		return false
-	}
-
-	// Additional recipe-specific validation
-	if len(p.Title) < 5 || len(p.Description) < 10 {
-		logger.WriteWarning(fmt.Sprintf("Recipe missing key information: %s", p.Title))
-		return false
-	}
-
-	// Create the new page with refresh to ensure immediate visibility
-	_, err := client.Index().
-		Index(IndexName).
-		Id(p.ID).
-		Refresh("true").
-		BodyJson(p).
-		Do(ctx)
-
-	if err != nil {
-		logger.WriteWarning(fmt.Sprintf("Failed to create the page: %v", err))
-		return false
-	}
-
-	logger.WriteInfo(fmt.Sprintf("Successfully created new recipe - Title: %s, URL: %s", p.Title, p.URL))
-	return true
+	return hits > 0
 }
 
 // Helper function to extract source site from URL
@@ -560,9 +453,76 @@ func extractDomainFromURL(urlPath string) string {
 	return ""
 }
 
-// UpdatePage updates an existing page only if the URL is valid and unique
+// CreatePage creates a new page in Elasticsearch
+func CreatePage(p structs.Page) bool {
+	ctx := context.Background()
+
+	// Validate required fields
+	if p.Title == "" || p.Name == "" || p.Ingredients == "" || p.Instructions == "" {
+		logger.WriteWarning(fmt.Sprintf("Cannot create page, missing required fields: %s", p.URL))
+		return false
+	}
+
+	// Convert relative URL to absolute if needed
+	if strings.HasPrefix(p.URL, "/") {
+		// Extract domain from context or use a default one
+		domain := extractDomainFromURL(p.URL)
+		if domain == "" {
+			domain = "https://www.example.com" // Fallback
+		}
+		p.URL = domain + p.URL
+	}
+
+	// Validate URL format for any supported recipe site
+	if !isValidRecipeURL(p.URL) {
+		logger.WriteWarning(fmt.Sprintf("Invalid recipe URL format: %s", p.URL))
+		return false
+	}
+
+	// Set source site from URL
+	p.SourceSite = extractSourceSite(p.URL)
+
+	// Set crawl date to current time
+	p.CrawlDate = time.Now()
+
+	// Check if URL already exists
+	if existingURL(p.URL) {
+		logger.WriteWarning(fmt.Sprintf("URL already exists in database: %s", p.URL))
+		return false
+	}
+
+	// Basic validation of extracted data
+	if len(p.Ingredients) < 10 || len(p.Instructions) < 20 {
+		logger.WriteWarning(fmt.Sprintf("Recipe data seems incomplete: %s", p.Title))
+		return false
+	}
+
+	// Create the new page with refresh to ensure immediate visibility
+	_, err := client.Index().
+		Index(IndexName).
+		Id(p.ID).
+		Refresh("true").
+		BodyJson(p).
+		Do(ctx)
+
+	if err != nil {
+		logger.WriteWarning(fmt.Sprintf("Failed to create the page: %v", err))
+		return false
+	}
+
+	logger.WriteInfo(fmt.Sprintf("Successfully created new recipe - Title: %s, URL: %s", p.Title, p.URL))
+	return true
+}
+
+// UpdatePage updates an existing page in Elasticsearch
 func UpdatePage(id string, params map[string]interface{}) bool {
 	ctx := context.Background()
+
+	// Validate required fields
+	if _, ok := params["title"].(string); !ok || params["title"].(string) == "" {
+		logger.WriteWarning("Cannot update page, missing title")
+		return false
+	}
 
 	// If URL is being updated, validate it
 	if url, ok := params["url"].(string); ok {
@@ -604,45 +564,22 @@ func UpdatePage(id string, params map[string]interface{}) bool {
 		// Only check for existing URL if it's different from the current URL
 		if currentPage.URL != url {
 			logger.WriteInfo(fmt.Sprintf("Checking if new URL exists: %s", url))
-			if existingURL(client, IndexName, url) {
+			if existingURL(url) {
 				logger.WriteWarning(fmt.Sprintf("URL already exists in another document, skipping update: %s", url))
 				return false
 			}
 		}
 	}
 
-	// If title is being updated, check for duplicates
-	if title, ok := params["title"].(string); ok {
-		// Get the current document to compare titles
-		currentDoc, err := client.Get().
-			Index(IndexName).
-			Id(id).
-			Do(ctx)
+	// Validate ingredients and instructions
+	if ingredients, ok := params["ingredients"].(string); ok && len(ingredients) < 10 {
+		logger.WriteWarning("Ingredients data seems incomplete, skipping update")
+		return false
+	}
 
-		if err != nil {
-			logger.WriteWarning(fmt.Sprintf("Failed to get current document: %v", err))
-			return false
-		}
-
-		var currentPage structs.Page
-		if err := json.Unmarshal(currentDoc.Source, &currentPage); err != nil {
-			logger.WriteWarning(fmt.Sprintf("Failed to unmarshal current page: %v", err))
-			return false
-		}
-
-		// Only check for existing title if it's different from the current title
-		if currentPage.Title != title {
-			logger.WriteInfo(fmt.Sprintf("Checking if new title exists: %s", title))
-			if existingTitle(client, IndexName, title) {
-				logger.WriteWarning(fmt.Sprintf("Title already exists in another document, skipping update: %s", title))
-				return false
-			}
-		}
-
-		// If name isn't being updated, sync it with title
-		if _, ok := params["name"]; !ok {
-			params["name"] = title
-		}
+	if instructions, ok := params["instructions"].(string); ok && len(instructions) < 20 {
+		logger.WriteWarning("Instructions data seems incomplete, skipping update")
+		return false
 	}
 
 	// Update crawl_date
@@ -664,4 +601,138 @@ func UpdatePage(id string, params map[string]interface{}) bool {
 
 	logger.WriteInfo(fmt.Sprintf("Successfully updated page with ID: %s", id))
 	return true
+}
+
+// SearchRecipes performs a search for recipes with the given query
+func SearchRecipes(query string, from, size int) ([]structs.Page, int64, error) {
+	ctx := context.Background()
+
+	// Create a multi-match query for broader search
+	multiMatchQuery := elastic.NewMultiMatchQuery(query,
+		"title^3",         // Boost title matches
+		"name^2",          // Boost name matches
+		"ingredients^1.5", // Boost ingredient matches
+		"description",
+		"instructions",
+	).Type("best_fields").Fuzziness("AUTO")
+
+	// Create a search query
+	searchQuery := elastic.NewBoolQuery().
+		Should(multiMatchQuery).
+		MinimumShouldMatch("1")
+
+	// Execute the search
+	result, err := client.Search().
+		Index(IndexName).
+		Query(searchQuery).
+		From(from).
+		Size(size).
+		Sort("_score", false). // Sort by relevance
+		Do(ctx)
+
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Parse the search results
+	var recipes []structs.Page
+	for _, hit := range result.Hits.Hits {
+		var recipe structs.Page
+		err := json.Unmarshal(hit.Source, &recipe)
+		if err != nil {
+			logger.WriteWarning(fmt.Sprintf("Failed to unmarshal recipe: %v", err))
+			continue
+		}
+		recipes = append(recipes, recipe)
+	}
+
+	return recipes, result.TotalHits(), nil
+}
+
+// GetRecentRecipes gets the most recently crawled recipes
+func GetRecentRecipes(limit int) ([]structs.Page, error) {
+	ctx := context.Background()
+
+	// Query for all recipes, sorted by crawl date
+	searchQuery := elastic.NewMatchAllQuery()
+
+	// Execute the search
+	result, err := client.Search().
+		Index(IndexName).
+		Query(searchQuery).
+		Sort("crawl_date", false). // Sort by crawl date, newest first
+		Size(limit).
+		Do(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the search results
+	var recipes []structs.Page
+	for _, hit := range result.Hits.Hits {
+		var recipe structs.Page
+		err := json.Unmarshal(hit.Source, &recipe)
+		if err != nil {
+			logger.WriteWarning(fmt.Sprintf("Failed to unmarshal recipe: %v", err))
+			continue
+		}
+		recipes = append(recipes, recipe)
+	}
+
+	return recipes, nil
+}
+
+// FindSimilarRecipes finds recipes similar to the given recipe ID
+func FindSimilarRecipes(recipeID string, limit int) ([]structs.Page, error) {
+	ctx := context.Background()
+
+	// First get the recipe
+	getResult, err := client.Get().
+		Index(IndexName).
+		Id(recipeID).
+		Do(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var recipe structs.Page
+	if err := json.Unmarshal(getResult.Source, &recipe); err != nil {
+		return nil, err
+	}
+
+	// Create a query based on recipe ingredients and title
+	titleQuery := elastic.NewMatchQuery("title", recipe.Title).Boost(1.5)
+	ingredientsQuery := elastic.NewMatchQuery("ingredients", recipe.Ingredients).Boost(2)
+
+	searchQuery := elastic.NewBoolQuery().
+		Should(titleQuery, ingredientsQuery).
+		MustNot(elastic.NewIdsQuery().Ids(recipeID)). // Exclude the recipe itself
+		MinimumShouldMatch("1")
+
+	// Execute the search
+	result, err := client.Search().
+		Index(IndexName).
+		Query(searchQuery).
+		Size(limit).
+		Do(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the search results
+	var recipes []structs.Page
+	for _, hit := range result.Hits.Hits {
+		var similarRecipe structs.Page
+		err := json.Unmarshal(hit.Source, &similarRecipe)
+		if err != nil {
+			logger.WriteWarning(fmt.Sprintf("Failed to unmarshal recipe: %v", err))
+			continue
+		}
+		recipes = append(recipes, similarRecipe)
+	}
+
+	return recipes, nil
 }
