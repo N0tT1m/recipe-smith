@@ -75,9 +75,9 @@ class _ElasticsearchRecipeDetailState extends State<ElasticsearchRecipeDetail> {
       final recipeData = {
         'image': recipe['image'],
         'name': recipe['name'],
-        'preptime': recipe['prep time'],
-        'cooktime': recipe['cook time'],
-        'totaltime': recipe['total time'],
+        'prep_time': recipe['prep_time'],
+        'cook_time': recipe['cook_time'],
+        'total_time': recipe['total_time'],
         'calories': recipe['calories'],
         'servings': recipe['servings'],
         'ingredients': recipe['ingredients'],
@@ -227,8 +227,9 @@ class _ElasticsearchRecipeDetailState extends State<ElasticsearchRecipeDetail> {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         children: [
-                          _buildInfoItem(Icons.timer, 'Prep', recipe['prep time'].toString()),
-                          _buildInfoItem(Icons.local_fire_department, 'Cook', recipe['cook time'].toString()),
+                          _buildInfoItem(Icons.timer, 'Prep', recipe['prep_time'].toString()),
+                          _buildInfoItem(Icons.local_fire_department, 'Cook', recipe['cook_time'].toString()),
+                          _buildInfoItem(Icons.timer_3, 'Total', recipe['total_time'].toString()),
                           _buildInfoItem(Icons.people, 'Serves', recipe['servings'].toString()),
                           _buildInfoItem(Icons.whatshot, 'Calories', recipe['calories'].toString()),
                         ],

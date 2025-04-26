@@ -29,11 +29,11 @@ class ElasticsearchRecipes {
     // Make sure all required fields exist with at least empty strings
     return {
       'id': esRecipe['id'] ?? '', // Include the ID
-      'name': esRecipe['name'] ?? esRecipe['title'] ?? 'Unnamed Recipe',
+      'name': esRecipe['title'] ?? 'Unnamed Recipe',
       'image': esRecipe['image'] ?? '',
-      'prep time': esRecipe['prep_time'] ?? '',
-      'cook time': esRecipe['cook_time'] ?? '',
-      'total time': esRecipe['total_time'] ?? '',
+      'prep_time': esRecipe['prep_time'] ?? '',
+      'cook_time': esRecipe['cook_time'] ?? '',
+      'total_time': esRecipe['total_time'] ?? '',
       'calories': esRecipe['calories'] ?? '',
       'servings': esRecipe['servings'] ?? '',
       // Handle ingredients and instructions which might be lists or strings
@@ -194,43 +194,6 @@ class ElasticsearchRecipes {
   }
 }
 
-
-// Modify RecipeGridView to accept a ScrollController
-class RecipeGridView extends StatelessWidget {
-  final List<Map<String, dynamic>> recipes;
-  final Function(String) onRecipeTap;
-  final ScrollController? scrollController;
-
-  const RecipeGridView({
-    Key? key,
-    required this.recipes,
-    required this.onRecipeTap,
-    this.scrollController,
-  }) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    return GridView.builder(
-      controller: scrollController,
-      padding: const EdgeInsets.all(8.0),
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        childAspectRatio: 0.75,
-        crossAxisSpacing: 10,
-        mainAxisSpacing: 10,
-      ),
-      itemCount: recipes.length,
-      itemBuilder: (context, index) {
-        final recipe = recipes[index];
-        return RecipeCard(
-          recipe: recipe,
-          onTap: () => onRecipeTap(recipe['id']),
-        );
-      },
-    );
-  }
-}
-
 // New widget for browsing all recipes
 class BrowseRecipesScreen extends StatefulWidget {
   const BrowseRecipesScreen({Key? key}) : super(key: key);
@@ -367,7 +330,43 @@ class _BrowseRecipesScreenState extends State<BrowseRecipesScreen> {
   }
 }
 
-// Widget for recipe card in grid view
+// Modify RecipeGridView to have a more balanced aspect ratio
+class RecipeGridView extends StatelessWidget {
+  final List<Map<String, dynamic>> recipes;
+  final Function(String) onRecipeTap;
+  final ScrollController? scrollController;
+
+  const RecipeGridView({
+    Key? key,
+    required this.recipes,
+    required this.onRecipeTap,
+    this.scrollController,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return GridView.builder(
+      controller: scrollController,
+      padding: const EdgeInsets.all(8.0),
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        childAspectRatio: 1.1, // Higher ratio makes cards shorter
+        crossAxisSpacing: 10,
+        mainAxisSpacing: 10,
+      ),
+      itemCount: recipes.length,
+      itemBuilder: (context, index) {
+        final recipe = recipes[index];
+        return RecipeCard(
+          recipe: recipe,
+          onTap: () => onRecipeTap(recipe['id']),
+        );
+      },
+    );
+  }
+}
+
+// Modified RecipeCard to be more compact with minimal height
 class RecipeCard extends StatelessWidget {
   final Map<String, dynamic> recipe;
   final VoidCallback onTap;
@@ -382,18 +381,20 @@ class RecipeCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       clipBehavior: Clip.antiAlias,
-      elevation: 3,
+      elevation: 5,
+      margin: EdgeInsets.zero, // Remove default card margin
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(8),
       ),
       child: InkWell(
         onTap: onTap,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min, // Keep column as small as possible
           children: [
-            // Recipe image
+            // Recipe image with smaller ratio to reduce height
             AspectRatio(
-              aspectRatio: 16 / 9,
+              aspectRatio: 16 / 10, // Slightly taller to reduce overall card height
               child: recipe['image'] != null && recipe['image'].toString().isNotEmpty
                   ? Image.network(
                 recipe['image'],
@@ -409,50 +410,57 @@ class RecipeCard extends StatelessWidget {
               ),
             ),
 
+            // Minimal content area
             Padding(
-              padding: const EdgeInsets.all(8.0),
+              padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 5.0), // Slightly increased vertical padding
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Recipe title
+                  // Recipe title - single line to save space
                   Text(
                     recipe['name'],
                     style: TextStyle(
                       fontWeight: FontWeight.bold,
-                      fontSize: 14,
+                      fontSize: 17, // Smaller font
+                      color: Colors.blue[300],
                     ),
-                    maxLines: 2,
+                    maxLines: 1, // Only one line
                     overflow: TextOverflow.ellipsis,
                   ),
-                  SizedBox(height: 4),
 
-                  // Recipe details
-                  Row(
-                    children: [
-                      Icon(Icons.timer, size: 16),
-                      SizedBox(width: 4),
-                      Expanded(
-                        child: Text(
-                          recipe['total time'] ?? 'N/A',
-                          style: TextStyle(fontSize: 12),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
-
-                  if (recipe['source_site'] != null && recipe['source_site'].toString().isNotEmpty)
+                  // Optional time and source in single row if available
+                  if (recipe['total_time'] != null || recipe['source_site'] != null)
                     Padding(
-                      padding: const EdgeInsets.only(top: 4.0),
-                      child: Text(
-                        recipe['source_site'],
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey[600],
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                      padding: const EdgeInsets.only(top: 2.0),
+                      child: Row(
+                        children: [
+                          if (recipe['total_time'] != null && recipe['total_time'].toString().isNotEmpty)
+                            Expanded(
+                              child: Text(
+                                recipe['total_time'],
+                                style: TextStyle(
+                                  fontSize: 15, // Increased from 10
+                                  color: Colors.grey[500],
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          if (recipe['source_site'] != null && recipe['source_site'].toString().isNotEmpty)
+                            Expanded(
+                              child: Text(
+                                recipe['source_site'],
+                                style: TextStyle(
+                                  fontSize: 15, // Increased from 10
+                                  color: Colors.grey[600],
+                                ),
+                                textAlign: TextAlign.end,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                 ],

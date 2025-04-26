@@ -25,7 +25,7 @@ class ESService {
     // Make sure all required fields exist with at least empty strings
     return {
       'id': esRecipe['id'] ?? '',
-      'name': esRecipe['name'] ?? esRecipe['title'] ?? 'Unnamed Recipe',
+      'name': esRecipe['title'] ?? 'Unnamed Recipe',
       'image': esRecipe['image'] ?? '',
       'prep_time': esRecipe['prep_time'] ?? '',
       'cook_time': esRecipe['cook_time'] ?? '',

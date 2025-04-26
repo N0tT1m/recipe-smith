@@ -8,10 +8,10 @@ Future<List<Map<String, dynamic>>> retrieveResults() async {
   List<Map<String, dynamic>> data = [];
 
   final conn = await MySQLConnection.createConnection(
-      host: '71.135.198.135',
+      host: '192.168.1.78',
       port: 3306,
       userName: 'root',
-      password: 'Babycakes15!',
+      password: 'Babycakes15',
       databaseName: 'saute');
 
   // var conn = await conn.connect(settings);
@@ -56,10 +56,10 @@ Future<List<String>> retrieveIngredients() async {
   List<String> recipeIngredients = [];
 
   final conn = await MySQLConnection.createConnection(
-      host: '71.135.198.135',
+      host: '192.168.1.78',
       port: 3306,
       userName: 'root',
-      password: 'Babycakes15!',
+      password: 'Babycakes15',
       databaseName: 'saute');
 
   // var conn = await conn.connect(settings);
@@ -88,10 +88,10 @@ Future<Map<String, dynamic>> retrieveRecipe(String recipeName) async {
   Map<String, dynamic> mappedData = {};
 
   var conn = await MySQLConnection.createConnection(
-    host: '71.135.198.135',
+    host: '192.168.1.78',
     port: 3306,
     userName: 'root',
-    password: 'Babycakes15!',
+    password: 'Babycakes15',
     databaseName: 'saute',
   );
 
@@ -132,10 +132,10 @@ Future<List<String>> getShoppingList() async {
   List<String> splitList = [];
 
   var conn = await MySQLConnection.createConnection(
-    host: '71.135.198.135',
+    host: '192.168.1.78',
     port: 3306,
     userName: 'root',
-    password: 'Babycakes15!',
+    password: 'Babycakes15',
     databaseName: 'saute',
   );
 
@@ -159,10 +159,10 @@ Future<List<String>> getShoppingList() async {
 
 Future<void> updateShoppingList(List<String> shoppingList) async {
   var conn = await MySQLConnection.createConnection(
-    host: '71.135.198.135',
+    host: '192.168.1.78',
     port: 3306,
     userName: 'root',
-    password: 'Babycakes15!',
+    password: 'Babycakes15',
     databaseName: 'saute',
   );
 
@@ -185,10 +185,10 @@ Future<List<String>> retrieveImages() async {
   List<String> images = [];
 
   var conn = await MySQLConnection.createConnection(
-      host: '71.135.198.135',
+      host: '192.168.1.78',
       port: 3306,
       userName: 'root',
-      password: 'Babycakes15!',
+      password: 'Babycakes15',
       databaseName: 'saute'
   );
 
@@ -211,10 +211,10 @@ Future<List<String>> retrieveTitles() async {
   List<String> titles = [];
 
   var conn = await MySQLConnection.createConnection(
-      host: '71.135.198.135',
+      host: '192.168.1.78',
       port: 3306,
       userName: 'root',
-      password: 'Babycakes15!',
+      password: 'Babycakes15',
       databaseName: 'saute');
 
   await conn.connect();
@@ -234,10 +234,10 @@ Future<List<String>> retrieveTitles() async {
 
 void createRecipesTables() async {
   var conn = await MySQLConnection.createConnection(
-      host: '71.135.198.135',
+      host: '192.168.1.78',
       port: 3306,
       userName: 'root',
-      password: 'Babycakes15!',
+      password: 'Babycakes15',
       databaseName: 'saute');
 
   await conn.connect();
@@ -250,10 +250,10 @@ void createRecipesTables() async {
 
 void createShoppingListTables() async {
   var conn = await MySQLConnection.createConnection(
-      host: '71.135.198.135',
+      host: '192.168.1.78',
       port: 3306,
       userName: 'root',
-      password: 'Babycakes15!',
+      password: 'Babycakes15',
       databaseName: 'saute');
 
   await conn.connect();
@@ -266,15 +266,15 @@ void createShoppingListTables() async {
 
 Future<void> writeRecipes(Map<String, dynamic> data) async {
   final conn = await MySQLConnection.createConnection(
-    host: '71.135.198.135',
+    host: '192.168.1.78',
     port: 3306,
     userName: 'root',
-    password: 'Babycakes15!',  // Delete existing shopping list
+    password: 'Babycakes15',  // Delete existing shopping list
     databaseName: 'saute',
   );
   await conn.connect();
   await conn.execute(
-    'INSERT INTO recipes (image, name, preptime, cooktime, totaltime, calories, servings, ingredients, instructions) VALUES (:image, :name, :preptime, :cooktime, :totaltime, :calories, :servings, :ingredients, :instructions)',
+    'INSERT INTO recipes (image, name, preptime, cooktime, totaltime, calories, servings, ingredients, instructions) VALUES (:image, :name, :prep_time, :cook_time, :total_time, :calories, :servings, :ingredients, :instructions)',
     data,
   );
   await conn.close();
@@ -282,10 +282,10 @@ Future<void> writeRecipes(Map<String, dynamic> data) async {
 
 // Future<void> writeShoppingList(List<String> items) async {
 //   var conn = await MySQLConnection.createConnection(
-//     host: '71.135.198.135',
+//     host: '192.168.1.78',
 //     port: 3306,
 //     userName: 'root',
-//     password: 'Babycakes15!',
+//     password: 'Babycakes15',
 //     databaseName: 'saute',
 //   );
 
@@ -305,10 +305,10 @@ Future<void> writeRecipes(Map<String, dynamic> data) async {
 
 Future<void> writeShoppingList(Map<String, dynamic> items) async {
   var conn = await MySQLConnection.createConnection(
-    host: '71.135.198.135',
+    host: '192.168.1.78',
     port: 3306,
     userName: 'root',
-    password: 'Babycakes15!',
+    password: 'Babycakes15',
     databaseName: 'saute',
   );
   await conn.connect();
@@ -330,10 +330,10 @@ Future<void> writeShoppingList(Map<String, dynamic> items) async {
 
 void addToShoppingList(Map<String, dynamic> data) async {
   var conn = await MySQLConnection.createConnection(
-      host: '71.135.198.135',
+      host: '192.168.1.78',
       port: 3306,
       userName: 'root',
-      password: 'Babycakes15!',
+      password: 'Babycakes15',
       databaseName: 'saute');
 
   await conn.connect();
@@ -346,10 +346,10 @@ void addToShoppingList(Map<String, dynamic> data) async {
 
 void dropShoppingListTable() async {
   var conn = await MySQLConnection.createConnection(
-      host: '71.135.198.135',
+      host: '192.168.1.78',
       port: 3306,
       userName: 'root',
-      password: 'Babycakes15!',
+      password: 'Babycakes15',
       databaseName: 'saute');
 
   await conn.connect();
@@ -362,10 +362,10 @@ void dropShoppingListTable() async {
 // Delete a recipe by name
 Future<void> deleteRecipe(String name) async {
   var conn = await MySQLConnection.createConnection(
-    host: '71.135.198.135',
+    host: '192.168.1.78',
     port: 3306,
     userName: 'root',
-    password: 'Babycakes15!',
+    password: 'Babycakes15',
     databaseName: 'saute',
   );
 
@@ -384,10 +384,10 @@ Future<List<Map<String, dynamic>>> searchRecipes(String query) async {
   List<Map<String, dynamic>> data = [];
 
   var conn = await MySQLConnection.createConnection(
-    host: '71.135.198.135',
+    host: '192.168.1.78',
     port: 3306,
     userName: 'root',
-    password: 'Babycakes15!',
+    password: 'Babycakes15',
     databaseName: 'saute',
   );
 

@@ -7,6 +7,7 @@ import 'package:saute/widgets/recipes.dart';
 import 'package:saute/widgets/admin.dart';
 import 'package:saute/widgets/recipe_search.dart';
 import 'package:saute/widgets/elasticsearch_recipes.dart';
+import 'package:saute/services/db.dart';
 
 void main() async {
   // await Firebase.initializeApp(
@@ -77,6 +78,8 @@ class _MyHomePageState extends State<MyHomePage> {
     setState(() {
 
     });
+    createRecipesTables();
+    createShoppingListTables();
     super.initState();
   }
 

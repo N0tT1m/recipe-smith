@@ -200,6 +200,350 @@ func (s *Scraper) MetaDataInformation() (string, string) {
 	return t, d
 }
 
+// GetRecipeInstructions extracts recipe instructions
+func (s *Scraper) GetRecipeInstructions() string {
+	var instructions []string
+
+	// Try schema.org instructions
+	s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='recipeInstructions'], [itemscope] [itemprop='recipeInstructions']").Each(func(i int, item *goquery.Selection) {
+		// Check if this is a container with multiple steps
+		steps := item.Find("li, .step")
+		if steps.Length() > 0 {
+			steps.Each(func(j int, step *goquery.Selection) {
+				instruction := strings.TrimSpace(step.Text())
+				if instruction != "" {
+					instructions = append(instructions, instruction)
+				}
+			})
+		} else {
+			// Single instruction text
+			instruction := strings.TrimSpace(item.Text())
+			if instruction != "" {
+				instructions = append(instructions, instruction)
+			}
+		}
+	})
+
+	// Try LD+JSON schema for instructions - complex version handling multiple formats
+	if len(instructions) == 0 {
+		s.doc.Find("script[type='application/ld+json']").Each(func(i int, item *goquery.Selection) {
+			if len(instructions) > 0 {
+				return
+			}
+
+			scriptContent := item.Text()
+			if strings.Contains(scriptContent, "Recipe") && strings.Contains(scriptContent, "recipeInstructions") {
+				// Try to parse the JSON
+				var jsonMap map[string]interface{}
+				if err := json.Unmarshal([]byte(scriptContent), &jsonMap); err == nil {
+					// Check if this is a Recipe
+					if jsonType, ok := jsonMap["@type"].(string); ok && (jsonType == "Recipe" || strings.Contains(jsonType, "Recipe")) {
+						// Try to get instruction information - handle different formats
+						if instList, ok := jsonMap["recipeInstructions"].([]interface{}); ok {
+							for _, inst := range instList {
+								// Format 1: Array of strings
+								if instStr, ok := inst.(string); ok {
+									instructions = append(instructions, instStr)
+								} else if instObj, ok := inst.(map[string]interface{}); ok {
+									// Format 2: Array of HowToStep objects
+									if text, ok := instObj["text"].(string); ok {
+										instructions = append(instructions, text)
+									}
+								}
+							}
+						} else if instStr, ok := jsonMap["recipeInstructions"].(string); ok {
+							// Format 3: Single string with all instructions
+							// Split by periods or newlines
+							splits := regexp.MustCompile(`[.;]\s+`).Split(instStr, -1)
+							for _, s := range splits {
+								s = strings.TrimSpace(s)
+								if s != "" {
+									instructions = append(instructions, s)
+								}
+							}
+						}
+					}
+				} else {
+					// Multiple regex patterns to handle different JSON-LD formats for instructions
+
+					// Try to match HowToStep format first (most common)
+					stepFormat := regexp.MustCompile(`"recipeInstructions"\s*:\s*\[\s*\{\s*"@type"\s*:\s*"HowToStep",\s*"text"\s*:\s*"([^"]+)"`)
+					stepMatches := stepFormat.FindAllStringSubmatch(scriptContent, -1)
+					for _, match := range stepMatches {
+						if len(match) >= 2 {
+							instructions = append(instructions, match[1])
+						}
+					}
+
+					// If no matches, try array of strings format
+					if len(instructions) == 0 {
+						stringFormat := regexp.MustCompile(`"recipeInstructions"\s*:\s*\[\s*"([^"]+)"`)
+						stringMatches := stringFormat.FindAllStringSubmatch(scriptContent, -1)
+						for _, match := range stringMatches {
+							if len(match) >= 2 {
+								instructions = append(instructions, match[1])
+							}
+						}
+					}
+
+					// If still no matches, try single string format
+					if len(instructions) == 0 {
+						singleFormat := regexp.MustCompile(`"recipeInstructions"\s*:\s*"([^"]+)"`)
+						singleMatches := singleFormat.FindStringSubmatch(scriptContent)
+						if len(singleMatches) >= 2 {
+							// Split by periods or newlines
+							splits := regexp.MustCompile(`[.;]\s+`).Split(singleMatches[1], -1)
+							for _, s := range splits {
+								s = strings.TrimSpace(s)
+								if s != "" {
+									instructions = append(instructions, s)
+								}
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+
+	// Special handling for Delish.com
+	if len(instructions) == 0 && strings.Contains(s.site, "delish.com") {
+		// Check for step-by-step instructions in ordered lists
+		s.doc.Find("ol li").Each(func(i int, item *goquery.Selection) {
+			instruction := strings.TrimSpace(item.Text())
+			if instruction != "" && len(instruction) > 10 {
+				instructions = append(instructions, instruction)
+			}
+		})
+
+		// Look for direction elements
+		if len(instructions) == 0 {
+			s.doc.Find(".direction-item, .preparation-steps li, .preparation-step").Each(func(i int, item *goquery.Selection) {
+				instruction := strings.TrimSpace(item.Text())
+				if instruction != "" {
+					instructions = append(instructions, instruction)
+				}
+			})
+		}
+
+		// Try to find the directions section in paragraphs
+		if len(instructions) == 0 {
+			directionsSection := false
+			s.doc.Find("p, h2, h3, h4").Each(func(i int, item *goquery.Selection) {
+				text := strings.TrimSpace(item.Text())
+
+				// Check for directions/instructions heading
+				if strings.Contains(strings.ToLower(text), "direction") || strings.Contains(strings.ToLower(text), "instruction") {
+					directionsSection = true
+					return
+				}
+
+				// Collect instructions if we're in the directions section
+				if directionsSection && text != "" && len(text) > 15 {
+					// Look for step indicators
+					if strings.HasPrefix(text, "Step") || regexp.MustCompile(`^\d+\)`).MatchString(text) {
+						instructions = append(instructions, text)
+					}
+				}
+			})
+		}
+	}
+
+	// Fallback to common instruction list patterns
+	if len(instructions) == 0 {
+		s.doc.Find(".instructions-item-name, .recipe-directions__list--item, .prep-steps li, .recipe-method-step, .recipe-instructions li").Each(func(i int, item *goquery.Selection) {
+			instruction := strings.TrimSpace(item.Text())
+			if instruction != "" {
+				instructions = append(instructions, instruction)
+			}
+		})
+	}
+
+	// Site-specific instruction extraction as last resort
+	if len(instructions) == 0 {
+		switch {
+		case strings.Contains(s.site, "allrecipes.com"):
+			s.doc.Find(".step, .instructions-section-item").Each(func(i int, item *goquery.Selection) {
+				instruction := strings.TrimSpace(item.Text())
+				if instruction != "" {
+					instructions = append(instructions, instruction)
+				}
+			})
+		case strings.Contains(s.site, "foodnetwork.com"):
+			s.doc.Find(".o-Method__m-Step, .recipe-directions-list li").Each(func(i int, item *goquery.Selection) {
+				instruction := strings.TrimSpace(item.Text())
+				if instruction != "" {
+					instructions = append(instructions, instruction)
+				}
+			})
+		case strings.Contains(s.site, "epicurious.com"):
+			s.doc.Find(".preparation-step, .preparation-steps li").Each(func(i int, item *goquery.Selection) {
+				instruction := strings.TrimSpace(item.Text())
+				if instruction != "" {
+					instructions = append(instructions, instruction)
+				}
+			})
+		}
+	}
+
+	// Clean up instructions
+	for i, instruction := range instructions {
+		// Remove "Step X:" prefixes
+		instruction = regexp.MustCompile(`^Step\s*\d+\s*:?\s*`).ReplaceAllString(instruction, "")
+
+		// Remove excessive whitespace
+		instruction = regexp.MustCompile(`\s+`).ReplaceAllString(instruction, " ")
+
+		instructions[i] = strings.TrimSpace(instruction)
+	}
+
+	// Join with semicolons as per the DB structure
+	return strings.Join(instructions, ";")
+}
+
+// GetRecipeCategories extracts recipe categories or tags
+func (s *Scraper) GetRecipeCategories() []string {
+	var categories []string
+
+	// Try schema.org categories
+	s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='recipeCategory'], [itemscope] [itemprop='recipeCategory']").Each(func(i int, item *goquery.Selection) {
+		category := strings.TrimSpace(item.Text())
+		if category != "" {
+			categories = append(categories, category)
+		}
+	})
+
+	// Try LD+JSON schema for categories
+	if len(categories) == 0 {
+		s.doc.Find("script[type='application/ld+json']").Each(func(i int, item *goquery.Selection) {
+			if len(categories) > 0 {
+				return
+			}
+
+			scriptContent := item.Text()
+			if strings.Contains(scriptContent, "Recipe") && strings.Contains(scriptContent, "recipeCategory") {
+				// Try to parse the JSON
+				var jsonMap map[string]interface{}
+				if err := json.Unmarshal([]byte(scriptContent), &jsonMap); err == nil {
+					// Check if this is a Recipe
+					if jsonType, ok := jsonMap["@type"].(string); ok && (jsonType == "Recipe" || strings.Contains(jsonType, "Recipe")) {
+						// Try to get category information
+						if catList, ok := jsonMap["recipeCategory"].([]interface{}); ok {
+							for _, cat := range catList {
+								if catStr, ok := cat.(string); ok {
+									categories = append(categories, catStr)
+								}
+							}
+						} else if catStr, ok := jsonMap["recipeCategory"].(string); ok {
+							categories = append(categories, catStr)
+						}
+					}
+				} else {
+					// Fallback to regex
+					re := regexp.MustCompile(`"recipeCategory"\s*:\s*\[(.*?)\]`)
+					matches := re.FindStringSubmatch(scriptContent)
+					if len(matches) >= 2 {
+						categoryListStr := matches[1]
+						categoryRe := regexp.MustCompile(`"([^"]+)"`)
+						categoryMatches := categoryRe.FindAllStringSubmatch(categoryListStr, -1)
+						for _, match := range categoryMatches {
+							if len(match) >= 2 {
+								categories = append(categories, match[1])
+							}
+						}
+					} else {
+						re := regexp.MustCompile(`"recipeCategory"\s*:\s*"([^"]+)"`)
+						matches := re.FindStringSubmatch(scriptContent)
+						if len(matches) >= 2 {
+							categories = append(categories, matches[1])
+						}
+					}
+				}
+			}
+		})
+	}
+
+	// Site specific extraction for Delish.com
+	if len(categories) == 0 && strings.Contains(s.site, "delish.com") {
+		s.doc.Find(".tag-link, .recipe-tags a, .content-header-label").Each(func(i int, item *goquery.Selection) {
+			category := strings.TrimSpace(item.Text())
+			if category != "" {
+				categories = append(categories, category)
+			}
+		})
+	}
+
+	// Fallback to common category tags
+	if len(categories) == 0 {
+		s.doc.Find(".recipe-categories a, .recipe-tags a, .category-tag").Each(func(i int, item *goquery.Selection) {
+			category := strings.TrimSpace(item.Text())
+			if category != "" {
+				categories = append(categories, category)
+			}
+		})
+	}
+
+	return categories
+}
+
+// GetRecipeData extracts all recipe data in one function
+func (s *Scraper) GetRecipeData() map[string]string {
+	recipeData := make(map[string]string)
+
+	// Get basic metadata
+	title, description := s.MetaDataInformation()
+	recipeData["title"] = title
+	recipeData["description"] = description
+
+	// Get recipe-specific data
+	recipeData["image"] = s.GetRecipeImage()
+	recipeData["name"] = s.GetRecipeName()
+
+	// If name wasn't found, use the title
+	if recipeData["name"] == "" {
+		recipeData["name"] = title
+	}
+
+	// Get prep time and total time, then calculate cook time
+	prepTime, cookTime, totalTime := s.GetRecipeTime()
+	recipeData["prep_time"] = prepTime
+	recipeData["cook_time"] = cookTime
+	recipeData["total_time"] = totalTime
+
+	calories, servings := s.GetRecipeNutrition()
+	recipeData["calories"] = calories
+	recipeData["servings"] = servings
+
+	recipeData["ingredients"] = s.GetRecipeIngredients()
+	recipeData["instructions"] = s.GetRecipeInstructions()
+
+	// Get categories
+	categories := s.GetRecipeCategories()
+	if len(categories) > 0 {
+		recipeData["categories"] = strings.Join(categories, ";")
+	}
+
+	// Extract source site from URL
+	parsedURL, err := url.Parse(s.url)
+	if err == nil {
+		recipeData["source_site"] = parsedURL.Host
+	}
+
+	recipeData["url"] = s.url
+
+	// Log what we found for debugging
+	log.Printf("Extracted recipe data from %s:", s.url)
+	log.Printf("  Title: %s", recipeData["title"])
+	log.Printf("  Name: %s", recipeData["name"])
+	log.Printf("  Times: Prep=%s, Cook=%s, Total=%s",
+		recipeData["prep_time"], recipeData["cook_time"], recipeData["total_time"])
+	log.Printf("  Servings: %s", recipeData["servings"])
+	log.Printf("  Ingredients: Found %d", strings.Count(recipeData["ingredients"], ";")+1)
+	log.Printf("  Instructions: Found %d", strings.Count(recipeData["instructions"], ";")+1)
+
+	return recipeData
+}
+
 // GetRecipeImage extracts the recipe image URL
 func (s *Scraper) GetRecipeImage() string {
 	var image string
@@ -397,11 +741,11 @@ func (s *Scraper) GetRecipeName() string {
 	return name
 }
 
-// GetRecipeTime extracts prep, cook, and total time
+// GetRecipeTime extracts prep and total time, then calculates cook time
 func (s *Scraper) GetRecipeTime() (string, string, string) {
 	var prepTime, cookTime, totalTime string
 
-	// Try schema.org timing information
+	// Try schema.org timing information for prep time
 	s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='prepTime'], [itemscope] [itemprop='prepTime']").Each(func(i int, item *goquery.Selection) {
 		if i == 0 {
 			prepTime = item.AttrOr("content", "")
@@ -414,18 +758,7 @@ func (s *Scraper) GetRecipeTime() (string, string, string) {
 		}
 	})
 
-	s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='cookTime'], [itemscope] [itemprop='cookTime']").Each(func(i int, item *goquery.Selection) {
-		if i == 0 {
-			cookTime = item.AttrOr("content", "")
-			// Convert ISO duration to simple format if needed
-			if strings.HasPrefix(cookTime, "PT") {
-				cookTime = convertISODuration(cookTime)
-			} else if cookTime == "" {
-				cookTime = strings.TrimSpace(item.Text())
-			}
-		}
-	})
-
+	// Get total time
 	s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='totalTime'], [itemscope] [itemprop='totalTime']").Each(func(i int, item *goquery.Selection) {
 		if i == 0 {
 			totalTime = item.AttrOr("content", "")
@@ -439,7 +772,7 @@ func (s *Scraper) GetRecipeTime() (string, string, string) {
 	})
 
 	// Try LD+JSON schema for times
-	if prepTime == "" || cookTime == "" || totalTime == "" {
+	if prepTime == "" || totalTime == "" {
 		s.doc.Find("script[type='application/ld+json']").Each(func(i int, item *goquery.Selection) {
 			scriptContent := item.Text()
 			if strings.Contains(scriptContent, "Recipe") {
@@ -451,12 +784,6 @@ func (s *Scraper) GetRecipeTime() (string, string, string) {
 						if prepTime == "" {
 							if pt, ok := jsonMap["prepTime"].(string); ok {
 								prepTime = convertISODuration(pt)
-							}
-						}
-
-						if cookTime == "" {
-							if ct, ok := jsonMap["cookTime"].(string); ok {
-								cookTime = convertISODuration(ct)
 							}
 						}
 
@@ -476,14 +803,6 @@ func (s *Scraper) GetRecipeTime() (string, string, string) {
 						}
 					}
 
-					if cookTime == "" {
-						re := regexp.MustCompile(`"cookTime"\s*:\s*"([^"]+)"`)
-						matches := re.FindStringSubmatch(scriptContent)
-						if len(matches) >= 2 {
-							cookTime = convertISODuration(matches[1])
-						}
-					}
-
 					if totalTime == "" {
 						re := regexp.MustCompile(`"totalTime"\s*:\s*"([^"]+)"`)
 						matches := re.FindStringSubmatch(scriptContent)
@@ -497,14 +816,12 @@ func (s *Scraper) GetRecipeTime() (string, string, string) {
 	}
 
 	// Site-specific time extraction for Delish.com
-	if (prepTime == "" || cookTime == "" || totalTime == "") && strings.Contains(s.site, "delish.com") {
+	if (prepTime == "" || totalTime == "") && strings.Contains(s.site, "delish.com") {
 		s.doc.Find(".recipe-info-item, .prep-info").Each(func(i int, item *goquery.Selection) {
 			text := strings.ToLower(item.Text())
 
 			if strings.Contains(text, "prep") && prepTime == "" {
 				prepTime = extractTime(text)
-			} else if strings.Contains(text, "cook") && cookTime == "" {
-				cookTime = extractTime(text)
 			} else if strings.Contains(text, "total") && totalTime == "" {
 				totalTime = extractTime(text)
 			}
@@ -512,21 +829,136 @@ func (s *Scraper) GetRecipeTime() (string, string, string) {
 	}
 
 	// Generic fallback for recipe time metadata
-	if prepTime == "" || cookTime == "" || totalTime == "" {
+	if prepTime == "" || totalTime == "" {
 		// Extract times based on common recipe site patterns
 		s.doc.Find(".recipe-meta-item, .recipe-meta, .recipe-details, .recipe-info").Each(func(i int, item *goquery.Selection) {
 			text := strings.ToLower(item.Text())
 			if strings.Contains(text, "prep") && prepTime == "" {
 				prepTime = extractTime(text)
-			} else if strings.Contains(text, "cook") && cookTime == "" {
-				cookTime = extractTime(text)
 			} else if strings.Contains(text, "total") && totalTime == "" {
 				totalTime = extractTime(text)
 			}
 		})
 	}
 
+	// Calculate cook time based on prep time and total time
+	if prepTime != "" && totalTime != "" {
+		cookTime = calculateCookTime(prepTime, totalTime)
+	} else {
+		// If we can't calculate, try to extract it directly as a fallback
+		// Attempt to extract cook time from schema.org
+		s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='cookTime'], [itemscope] [itemprop='cookTime']").Each(func(i int, item *goquery.Selection) {
+			if i == 0 {
+				cookTime = item.AttrOr("content", "")
+				// Convert ISO duration to simple format if needed
+				if strings.HasPrefix(cookTime, "PT") {
+					cookTime = convertISODuration(cookTime)
+				} else if cookTime == "" {
+					cookTime = strings.TrimSpace(item.Text())
+				}
+			}
+		})
+
+		// If still not found, check JSON-LD
+		if cookTime == "" {
+			s.doc.Find("script[type='application/ld+json']").Each(func(i int, item *goquery.Selection) {
+				if cookTime != "" {
+					return
+				}
+
+				scriptContent := item.Text()
+				if strings.Contains(scriptContent, "Recipe") && strings.Contains(scriptContent, "cookTime") {
+					var jsonMap map[string]interface{}
+					if err := json.Unmarshal([]byte(scriptContent), &jsonMap); err == nil {
+						if jsonType, ok := jsonMap["@type"].(string); ok && (jsonType == "Recipe" || strings.Contains(jsonType, "Recipe")) {
+							if ct, ok := jsonMap["cookTime"].(string); ok {
+								cookTime = convertISODuration(ct)
+							}
+						}
+					} else {
+						re := regexp.MustCompile(`"cookTime"\s*:\s*"([^"]+)"`)
+						matches := re.FindStringSubmatch(scriptContent)
+						if len(matches) >= 2 {
+							cookTime = convertISODuration(matches[1])
+						}
+					}
+				}
+			})
+		}
+
+		// Generic fallback for cook time
+		if cookTime == "" {
+			s.doc.Find(".recipe-meta-item, .recipe-meta, .recipe-details, .recipe-info").Each(func(i int, item *goquery.Selection) {
+				text := strings.ToLower(item.Text())
+				if strings.Contains(text, "cook") && !strings.Contains(text, "prep") {
+					cookTime = extractTime(text)
+				}
+			})
+		}
+	}
+
 	return prepTime, cookTime, totalTime
+}
+
+// Helper function to calculate cook time from prep time and total time
+func calculateCookTime(prepTime, totalTime string) string {
+	// Extract minutes from prep time
+	prepMinutes := extractMinutes(prepTime)
+
+	// Extract minutes from total time
+	totalMinutes := extractMinutes(totalTime)
+
+	// If either conversion failed, return empty string
+	if prepMinutes < 0 || totalMinutes < 0 {
+		return ""
+	}
+
+	// Ensure total time is greater than or equal to prep time
+	if totalMinutes < prepMinutes {
+		return ""
+	}
+
+	// Calculate cook time in minutes
+	cookMinutes := totalMinutes - prepMinutes
+
+	// Convert back to string format
+	if cookMinutes >= 60 {
+		hours := cookMinutes / 60
+		minutes := cookMinutes % 60
+		if minutes > 0 {
+			return fmt.Sprintf("%d hr %d min", hours, minutes)
+		}
+		return fmt.Sprintf("%d hr", hours)
+	}
+
+	return fmt.Sprintf("%d min", cookMinutes)
+}
+
+// Helper function to extract minutes from time string
+func extractMinutes(timeStr string) int {
+	// Extract hours
+	reHour := regexp.MustCompile(`(\d+)\s*(hour|hr|h)`)
+	hourMatches := reHour.FindStringSubmatch(timeStr)
+	hours := 0
+	if len(hourMatches) >= 3 {
+		fmt.Sscanf(hourMatches[1], "%d", &hours)
+	}
+
+	// Extract minutes
+	reMin := regexp.MustCompile(`(\d+)\s*(min|minute|m)`)
+	minMatches := reMin.FindStringSubmatch(timeStr)
+	minutes := 0
+	if len(minMatches) >= 3 {
+		fmt.Sscanf(minMatches[1], "%d", &minutes)
+	}
+
+	// If no matches found, return error code
+	if len(hourMatches) < 3 && len(minMatches) < 3 {
+		return -1
+	}
+
+	// Convert to total minutes
+	return hours*60 + minutes
 }
 
 // Helper function to extract time from text
@@ -845,347 +1277,4 @@ func (s *Scraper) GetRecipeIngredients() string {
 
 	// Join with semicolons as per the DB structure
 	return strings.Join(ingredients, ";")
-}
-
-// GetRecipeInstructions extracts recipe instructions
-func (s *Scraper) GetRecipeInstructions() string {
-	var instructions []string
-
-	// Try schema.org instructions
-	s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='recipeInstructions'], [itemscope] [itemprop='recipeInstructions']").Each(func(i int, item *goquery.Selection) {
-		// Check if this is a container with multiple steps
-		steps := item.Find("li, .step")
-		if steps.Length() > 0 {
-			steps.Each(func(j int, step *goquery.Selection) {
-				instruction := strings.TrimSpace(step.Text())
-				if instruction != "" {
-					instructions = append(instructions, instruction)
-				}
-			})
-		} else {
-			// Single instruction text
-			instruction := strings.TrimSpace(item.Text())
-			if instruction != "" {
-				instructions = append(instructions, instruction)
-			}
-		}
-	})
-
-	// Try LD+JSON schema for instructions - complex version handling multiple formats
-	if len(instructions) == 0 {
-		s.doc.Find("script[type='application/ld+json']").Each(func(i int, item *goquery.Selection) {
-			if len(instructions) > 0 {
-				return
-			}
-
-			scriptContent := item.Text()
-			if strings.Contains(scriptContent, "Recipe") && strings.Contains(scriptContent, "recipeInstructions") {
-				// Try to parse the JSON
-				var jsonMap map[string]interface{}
-				if err := json.Unmarshal([]byte(scriptContent), &jsonMap); err == nil {
-					// Check if this is a Recipe
-					if jsonType, ok := jsonMap["@type"].(string); ok && (jsonType == "Recipe" || strings.Contains(jsonType, "Recipe")) {
-						// Try to get instruction information - handle different formats
-						if instList, ok := jsonMap["recipeInstructions"].([]interface{}); ok {
-							for _, inst := range instList {
-								// Format 1: Array of strings
-								if instStr, ok := inst.(string); ok {
-									instructions = append(instructions, instStr)
-								} else if instObj, ok := inst.(map[string]interface{}); ok {
-									// Format 2: Array of HowToStep objects
-									if text, ok := instObj["text"].(string); ok {
-										instructions = append(instructions, text)
-									}
-								}
-							}
-						} else if instStr, ok := jsonMap["recipeInstructions"].(string); ok {
-							// Format 3: Single string with all instructions
-							// Split by periods or newlines
-							splits := regexp.MustCompile(`[.;]\s+`).Split(instStr, -1)
-							for _, s := range splits {
-								s = strings.TrimSpace(s)
-								if s != "" {
-									instructions = append(instructions, s)
-								}
-							}
-						}
-					}
-				} else {
-					// Multiple regex patterns to handle different JSON-LD formats for instructions
-
-					// Try to match HowToStep format first (most common)
-					stepFormat := regexp.MustCompile(`"recipeInstructions"\s*:\s*\[\s*\{\s*"@type"\s*:\s*"HowToStep",\s*"text"\s*:\s*"([^"]+)"`)
-					stepMatches := stepFormat.FindAllStringSubmatch(scriptContent, -1)
-					for _, match := range stepMatches {
-						if len(match) >= 2 {
-							instructions = append(instructions, match[1])
-						}
-					}
-
-					// If no matches, try array of strings format
-					if len(instructions) == 0 {
-						stringFormat := regexp.MustCompile(`"recipeInstructions"\s*:\s*\[\s*"([^"]+)"`)
-						stringMatches := stringFormat.FindAllStringSubmatch(scriptContent, -1)
-						for _, match := range stringMatches {
-							if len(match) >= 2 {
-								instructions = append(instructions, match[1])
-							}
-						}
-					}
-
-					// If still no matches, try single string format
-					if len(instructions) == 0 {
-						singleFormat := regexp.MustCompile(`"recipeInstructions"\s*:\s*"([^"]+)"`)
-						singleMatches := singleFormat.FindStringSubmatch(scriptContent)
-						if len(singleMatches) >= 2 {
-							// Split by periods or newlines
-							splits := regexp.MustCompile(`[.;]\s+`).Split(singleMatches[1], -1)
-							for _, s := range splits {
-								s = strings.TrimSpace(s)
-								if s != "" {
-									instructions = append(instructions, s)
-								}
-							}
-						}
-					}
-				}
-			}
-		})
-	}
-
-	// Special handling for Delish.com
-	if len(instructions) == 0 && strings.Contains(s.site, "delish.com") {
-		// Check for step-by-step instructions in ordered lists
-		s.doc.Find("ol li").Each(func(i int, item *goquery.Selection) {
-			instruction := strings.TrimSpace(item.Text())
-			if instruction != "" && len(instruction) > 10 {
-				instructions = append(instructions, instruction)
-			}
-		})
-
-		// Look for direction elements
-		if len(instructions) == 0 {
-			s.doc.Find(".direction-item, .preparation-steps li, .preparation-step").Each(func(i int, item *goquery.Selection) {
-				instruction := strings.TrimSpace(item.Text())
-				if instruction != "" {
-					instructions = append(instructions, instruction)
-				}
-			})
-		}
-
-		// Try to find the directions section in paragraphs
-		if len(instructions) == 0 {
-			directionsSection := false
-			s.doc.Find("p, h2, h3, h4").Each(func(i int, item *goquery.Selection) {
-				text := strings.TrimSpace(item.Text())
-
-				// Check for directions/instructions heading
-				if strings.Contains(strings.ToLower(text), "direction") || strings.Contains(strings.ToLower(text), "instruction") {
-					directionsSection = true
-					return
-				}
-
-				// Collect instructions if we're in the directions section
-				if directionsSection && text != "" && len(text) > 15 {
-					// Look for step indicators
-					if strings.HasPrefix(text, "Step") || regexp.MustCompile(`^\d+\)`).MatchString(text) {
-						instructions = append(instructions, text)
-					}
-				}
-			})
-		}
-	}
-
-	// Fallback to common instruction list patterns
-	if len(instructions) == 0 {
-		s.doc.Find(".instructions-item-name, .recipe-directions__list--item, .prep-steps li, .recipe-method-step, .recipe-instructions li").Each(func(i int, item *goquery.Selection) {
-			instruction := strings.TrimSpace(item.Text())
-			if instruction != "" {
-				instructions = append(instructions, instruction)
-			}
-		})
-	}
-
-	// Site-specific instruction extraction as last resort
-	if len(instructions) == 0 {
-		switch {
-		case strings.Contains(s.site, "allrecipes.com"):
-			s.doc.Find(".step, .instructions-section-item").Each(func(i int, item *goquery.Selection) {
-				instruction := strings.TrimSpace(item.Text())
-				if instruction != "" {
-					instructions = append(instructions, instruction)
-				}
-			})
-		case strings.Contains(s.site, "foodnetwork.com"):
-			s.doc.Find(".o-Method__m-Step, .recipe-directions-list li").Each(func(i int, item *goquery.Selection) {
-				instruction := strings.TrimSpace(item.Text())
-				if instruction != "" {
-					instructions = append(instructions, instruction)
-				}
-			})
-		case strings.Contains(s.site, "epicurious.com"):
-			s.doc.Find(".preparation-step, .preparation-steps li").Each(func(i int, item *goquery.Selection) {
-				instruction := strings.TrimSpace(item.Text())
-				if instruction != "" {
-					instructions = append(instructions, instruction)
-				}
-			})
-		}
-	}
-
-	// Clean up instructions
-	for i, instruction := range instructions {
-		// Remove "Step X:" prefixes
-		instruction = regexp.MustCompile(`^Step\s*\d+\s*:?\s*`).ReplaceAllString(instruction, "")
-
-		// Remove excessive whitespace
-		instruction = regexp.MustCompile(`\s+`).ReplaceAllString(instruction, " ")
-
-		instructions[i] = strings.TrimSpace(instruction)
-	}
-
-	// Join with semicolons as per the DB structure
-	return strings.Join(instructions, ";")
-}
-
-// GetRecipeCategories extracts recipe categories or tags
-func (s *Scraper) GetRecipeCategories() []string {
-	var categories []string
-
-	// Try schema.org categories
-	s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='recipeCategory'], [itemscope] [itemprop='recipeCategory']").Each(func(i int, item *goquery.Selection) {
-		category := strings.TrimSpace(item.Text())
-		if category != "" {
-			categories = append(categories, category)
-		}
-	})
-
-	// Try LD+JSON schema for categories
-	if len(categories) == 0 {
-		s.doc.Find("script[type='application/ld+json']").Each(func(i int, item *goquery.Selection) {
-			if len(categories) > 0 {
-				return
-			}
-
-			scriptContent := item.Text()
-			if strings.Contains(scriptContent, "Recipe") && strings.Contains(scriptContent, "recipeCategory") {
-				// Try to parse the JSON
-				var jsonMap map[string]interface{}
-				if err := json.Unmarshal([]byte(scriptContent), &jsonMap); err == nil {
-					// Check if this is a Recipe
-					if jsonType, ok := jsonMap["@type"].(string); ok && (jsonType == "Recipe" || strings.Contains(jsonType, "Recipe")) {
-						// Try to get category information
-						if catList, ok := jsonMap["recipeCategory"].([]interface{}); ok {
-							for _, cat := range catList {
-								if catStr, ok := cat.(string); ok {
-									categories = append(categories, catStr)
-								}
-							}
-						} else if catStr, ok := jsonMap["recipeCategory"].(string); ok {
-							categories = append(categories, catStr)
-						}
-					}
-				} else {
-					// Fallback to regex
-					re := regexp.MustCompile(`"recipeCategory"\s*:\s*\[(.*?)\]`)
-					matches := re.FindStringSubmatch(scriptContent)
-					if len(matches) >= 2 {
-						categoryListStr := matches[1]
-						categoryRe := regexp.MustCompile(`"([^"]+)"`)
-						categoryMatches := categoryRe.FindAllStringSubmatch(categoryListStr, -1)
-						for _, match := range categoryMatches {
-							if len(match) >= 2 {
-								categories = append(categories, match[1])
-							}
-						}
-					} else {
-						re := regexp.MustCompile(`"recipeCategory"\s*:\s*"([^"]+)"`)
-						matches := re.FindStringSubmatch(scriptContent)
-						if len(matches) >= 2 {
-							categories = append(categories, matches[1])
-						}
-					}
-				}
-			}
-		})
-	}
-
-	// Site specific extraction for Delish.com
-	if len(categories) == 0 && strings.Contains(s.site, "delish.com") {
-		s.doc.Find(".tag-link, .recipe-tags a, .content-header-label").Each(func(i int, item *goquery.Selection) {
-			category := strings.TrimSpace(item.Text())
-			if category != "" {
-				categories = append(categories, category)
-			}
-		})
-	}
-
-	// Fallback to common category tags
-	if len(categories) == 0 {
-		s.doc.Find(".recipe-categories a, .recipe-tags a, .category-tag").Each(func(i int, item *goquery.Selection) {
-			category := strings.TrimSpace(item.Text())
-			if category != "" {
-				categories = append(categories, category)
-			}
-		})
-	}
-
-	return categories
-}
-
-// GetRecipeData extracts all recipe data in one function
-func (s *Scraper) GetRecipeData() map[string]string {
-	recipeData := make(map[string]string)
-
-	// Get basic metadata
-	title, description := s.MetaDataInformation()
-	recipeData["title"] = title
-	recipeData["description"] = description
-
-	// Get recipe-specific data
-	recipeData["image"] = s.GetRecipeImage()
-	recipeData["name"] = s.GetRecipeName()
-
-	// If name wasn't found, use the title
-	if recipeData["name"] == "" {
-		recipeData["name"] = title
-	}
-
-	prepTime, cookTime, totalTime := s.GetRecipeTime()
-	recipeData["prep_time"] = prepTime
-	recipeData["cook_time"] = cookTime
-	recipeData["total_time"] = totalTime
-
-	calories, servings := s.GetRecipeNutrition()
-	recipeData["calories"] = calories
-	recipeData["servings"] = servings
-
-	recipeData["ingredients"] = s.GetRecipeIngredients()
-	recipeData["instructions"] = s.GetRecipeInstructions()
-
-	// Get categories
-	categories := s.GetRecipeCategories()
-	if len(categories) > 0 {
-		recipeData["categories"] = strings.Join(categories, ";")
-	}
-
-	// Extract source site from URL
-	parsedURL, err := url.Parse(s.url)
-	if err == nil {
-		recipeData["source_site"] = parsedURL.Host
-	}
-
-	recipeData["url"] = s.url
-
-	// Log what we found for debugging
-	log.Printf("Extracted recipe data from %s:", s.url)
-	log.Printf("  Title: %s", recipeData["title"])
-	log.Printf("  Name: %s", recipeData["name"])
-	log.Printf("  Times: Prep=%s, Cook=%s, Total=%s",
-		recipeData["prep_time"], recipeData["cook_time"], recipeData["total_time"])
-	log.Printf("  Servings: %s", recipeData["servings"])
-	log.Printf("  Ingredients: Found %d", strings.Count(recipeData["ingredients"], ";")+1)
-	log.Printf("  Instructions: Found %d", strings.Count(recipeData["instructions"], ";")+1)
-
-	return recipeData
 }
