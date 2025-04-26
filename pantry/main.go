@@ -39,6 +39,9 @@ var (
 	concurrentWorkers    = 10
 	crawlDelayPerDomain  = 1 * time.Second
 	maxRequestsPerDomain = 5
+
+	// Debug mode for more verbose logging
+	debugMode = false
 )
 
 // Custom Semaphore implementation for rate limiting
@@ -110,6 +113,11 @@ func isRecipeListingPage(urlStr string) bool {
 		"/recipe-ideas/",
 		"/recipes-a-z/",
 		"/category/",
+		"/collections/",
+		"/meal-type/",
+		"/cuisines/",
+		"/cooking-method/",
+		"/holidays-events/",
 	}
 
 	// Check if the path matches any listing pattern but doesn't have additional segments
@@ -124,6 +132,49 @@ func isRecipeListingPage(urlStr string) bool {
 				return true
 			}
 		}
+	}
+
+	return false
+}
+
+// isLikelyRecipePage does a best-effort check to see if a URL likely leads to a recipe page
+func isLikelyRecipePage(urlStr string) bool {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return false
+	}
+
+	path := parsedURL.Path
+
+	// Recipe indicators in the URL path
+	recipeIndicators := []string{
+		"/recipe/",
+		"/recipes/",
+		"-recipe",
+		"recipe-",
+		"-recipes",
+		"recipes-",
+	}
+
+	for _, indicator := range recipeIndicators {
+		if strings.Contains(path, indicator) {
+			return true
+		}
+	}
+
+	// Check for specific patterns we know lead to recipe detail pages
+	host := parsedURL.Host
+	switch {
+	case strings.Contains(host, "delish.com"):
+		return strings.Contains(path, "/recipe/") || strings.Contains(path, "/recipes/")
+	case strings.Contains(host, "allrecipes.com"):
+		return strings.Contains(path, "/recipe/") || strings.Contains(path, "/recipes/") && !isRecipeListingPage(urlStr)
+	case strings.Contains(host, "foodnetwork.com"):
+		return strings.Contains(path, "/recipes/") && strings.Count(path, "/") >= 3
+	case strings.Contains(host, "epicurious.com"):
+		return strings.Contains(path, "/recipes/") && !isRecipeListingPage(urlStr)
+	case strings.Contains(host, "simplyrecipes.com"):
+		return strings.Contains(path, "/recipes/") && strings.Count(path, "/") >= 3
 	}
 
 	return false
@@ -188,6 +239,9 @@ func crawlURL(urlStr string, depth int) {
 		return
 	}
 
+	// Check if this is a likely recipe page
+	isRecipe := isLikelyRecipePage(urlStr)
+
 	// For recipe pages, extract recipe data
 	recipeData := s.GetRecipeData()
 
@@ -196,7 +250,15 @@ func crawlURL(urlStr string, depth int) {
 	description := recipeData["description"]
 	body := s.Body()
 
-	logger.WriteInfo(fmt.Sprintf("Processing recipe page: %s", title))
+	logger.WriteInfo(fmt.Sprintf("Processing potential recipe page: %s", title))
+
+	// Debug mode - log all extracted data
+	if debugMode {
+		logger.WriteInfo(fmt.Sprintf("Extracted data for URL %s:", urlStr))
+		for key, value := range recipeData {
+			logger.WriteInfo(fmt.Sprintf("  %s: %s", key, value))
+		}
+	}
 
 	// Check if the page exists
 	existsLink, page := elasticsearch.ExistingPage(title)
@@ -204,14 +266,73 @@ func crawlURL(urlStr string, depth int) {
 	// Get a unique ID for new pages
 	id, _ := shortid.Generate()
 
-	// Check if we have the minimum required recipe data
-	hasMinimumData := recipeData["name"] != "" &&
-		(recipeData["ingredients"] != "" || strings.Contains(body, "ingredient")) &&
-		(recipeData["instructions"] != "" || strings.Contains(body, "direction") ||
-			strings.Contains(body, "instruction") || strings.Contains(body, "steps"))
+	// More flexible data checks
+	// Original stringent check:
+	// hasMinimumData := recipeData["name"] != "" &&
+	//	(recipeData["ingredients"] != "" || strings.Contains(body, "ingredient")) &&
+	//	(recipeData["instructions"] != "" || strings.Contains(body, "direction") ||
+	//		strings.Contains(body, "instruction") || strings.Contains(body, "steps"))
+
+	// More flexible check:
+	hasName := recipeData["name"] != "" || title != ""
+	hasIngredients := recipeData["ingredients"] != "" ||
+		strings.Contains(body, "ingredient") ||
+		strings.Contains(body, "Ingredient")
+
+	hasInstructions := recipeData["instructions"] != "" ||
+		strings.Contains(body, "direction") ||
+		strings.Contains(body, "Direction") ||
+		strings.Contains(body, "instruction") ||
+		strings.Contains(body, "Instruction") ||
+		strings.Contains(body, "steps") ||
+		strings.Contains(body, "Steps") ||
+		strings.Contains(body, "method") ||
+		strings.Contains(body, "Method") ||
+		strings.Contains(body, "preparation") ||
+		strings.Contains(body, "Preparation")
+
+	// Check if it's a likely recipe based on URL pattern AND has some recipe-like content
+	hasMinimumData := hasName && (hasIngredients || hasInstructions)
+
+	// If we're unsure, but the URL strongly suggests it's a recipe, try harder to extract data
+	if !hasMinimumData && isRecipe {
+		logger.WriteInfo(fmt.Sprintf("URL %s appears to be a recipe but missing some data, attempting recovery", urlStr))
+
+		// If name is missing, use title
+		if recipeData["name"] == "" {
+			recipeData["name"] = title
+			hasName = true
+		}
+
+		// If we're missing ingredients, do a wider search in the HTML
+		if recipeData["ingredients"] == "" && hasIngredients {
+			// Already checked body contains "ingredient", so we'll accept this despite missing structured data
+			logger.WriteInfo(fmt.Sprintf("Ingredients text found in body for URL %s but not structured, proceeding anyway", urlStr))
+		}
+
+		// If we're missing instructions, do a wider search in the HTML
+		if recipeData["instructions"] == "" && hasInstructions {
+			// Already checked body contains instruction keywords, so we'll accept this despite missing structured data
+			logger.WriteInfo(fmt.Sprintf("Instructions text found in body for URL %s but not structured, proceeding anyway", urlStr))
+		}
+
+		// Re-evaluate minimum data requirement
+		hasMinimumData = hasName && (hasIngredients || hasInstructions)
+	}
 
 	if !hasMinimumData {
 		logger.WriteWarning(fmt.Sprintf("Skipping URL %s - Missing essential recipe data", urlStr))
+
+		// Log what's missing to help debug
+		if !hasName {
+			logger.WriteWarning(fmt.Sprintf("  Missing name/title in URL %s", urlStr))
+		}
+		if !hasIngredients {
+			logger.WriteWarning(fmt.Sprintf("  Missing ingredients in URL %s", urlStr))
+		}
+		if !hasInstructions {
+			logger.WriteWarning(fmt.Sprintf("  Missing instructions in URL %s", urlStr))
+		}
 
 		// Even if we skip storing this page, we still queue its links for crawling
 		for _, link := range links {
@@ -228,6 +349,11 @@ func crawlURL(urlStr string, depth int) {
 		}
 
 		return
+	}
+
+	// Use title as name if name is missing
+	if recipeData["name"] == "" {
+		recipeData["name"] = title
 	}
 
 	if !existsLink {
@@ -459,10 +585,13 @@ func main() {
 		fmt.Println("\tgo run *.go index URL")
 		fmt.Println()
 		fmt.Println("3. If you want to crawl with custom parameters:")
-		fmt.Println("\tgo run *.go index URL -workers=20 -depth=5 -delay=2")
+		fmt.Println("\tgo run *.go index URL -workers=20 -depth=5 -delay=2 -debug=true")
 		fmt.Println()
 		fmt.Println("4. If you want to delete the pages index from elastic search:")
 		fmt.Println("\tgo run *.go delete")
+		fmt.Println()
+		fmt.Println("5. If you want to test a specific URL:")
+		fmt.Println("\tgo run *.go test-url URL")
 		return
 	}
 
@@ -479,6 +608,8 @@ func main() {
 			crawlDelayPerDomain = time.Duration(delay * float64(time.Second))
 		} else if strings.HasPrefix(arg, "-max-requests=") {
 			fmt.Sscanf(arg[14:], "%d", &maxRequestsPerDomain)
+		} else if strings.HasPrefix(arg, "-debug=") {
+			fmt.Sscanf(arg[7:], "%t", &debugMode)
 		}
 	}
 
@@ -504,6 +635,7 @@ func main() {
 		logger.WriteInfo(fmt.Sprintf("  Max Depth: %d", maxCrawlDepth))
 		logger.WriteInfo(fmt.Sprintf("  Delay: %v", crawlDelayPerDomain))
 		logger.WriteInfo(fmt.Sprintf("  Max Requests Per Domain: %d", maxRequestsPerDomain))
+		logger.WriteInfo(fmt.Sprintf("  Debug Mode: %t", debugMode))
 		logger.WriteInfo(fmt.Sprintf("  Starting URLs: %v", startURLs))
 
 		// Start crawling each URL
@@ -531,6 +663,9 @@ func main() {
 
 		testURL := args[2]
 		fmt.Printf("Testing URL: %s\n", testURL)
+
+		// Enable debug mode for testing
+		debugMode = true
 
 		// Create scraper
 		s := scraper.NewScraper(testURL)
@@ -567,6 +702,38 @@ func main() {
 		for i, instruction := range instructions {
 			fmt.Printf("    %d. %s\n", i+1, instruction)
 		}
+
+		// Check if this is a recipe listing or detail page
+		fmt.Println("\nURL Analysis:")
+		fmt.Printf("  Is recipe listing page: %t\n", isRecipeListingPage(testURL))
+		fmt.Printf("  Is likely recipe page: %t\n", isLikelyRecipePage(testURL))
+
+		// Check minimum data requirements
+		hasName := recipeData["name"] != "" || recipeData["title"] != ""
+		hasIngredients := recipeData["ingredients"] != ""
+		hasInstructions := recipeData["instructions"] != ""
+		body := s.Body()
+		if !hasIngredients {
+			hasIngredients = strings.Contains(body, "ingredient") || strings.Contains(body, "Ingredient")
+		}
+		if !hasInstructions {
+			hasInstructions = strings.Contains(body, "direction") ||
+				strings.Contains(body, "Direction") ||
+				strings.Contains(body, "instruction") ||
+				strings.Contains(body, "Instruction") ||
+				strings.Contains(body, "steps") ||
+				strings.Contains(body, "Steps") ||
+				strings.Contains(body, "method") ||
+				strings.Contains(body, "Method") ||
+				strings.Contains(body, "preparation") ||
+				strings.Contains(body, "Preparation")
+		}
+
+		fmt.Println("\nData Requirements Check:")
+		fmt.Printf("  Has name/title: %t\n", hasName)
+		fmt.Printf("  Has ingredients: %t\n", hasIngredients)
+		fmt.Printf("  Has instructions: %t\n", hasInstructions)
+		fmt.Printf("  Meets minimum requirements: %t\n", hasName && (hasIngredients || hasInstructions))
 
 		// Print links found
 		links := s.Links()

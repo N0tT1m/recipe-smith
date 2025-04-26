@@ -54,6 +54,8 @@ func main() {
 	r.HandleFunc("/api/recipes/all", getAllRecipes).Methods("GET")
 	r.HandleFunc("/api/recipes/category/{category}", getRecipesByCategory).Methods("GET")
 	r.HandleFunc("/api/recipes/recent", getRecentRecipes).Methods("GET")
+	// Add new count endpoint
+	r.HandleFunc("/api/recipes/count", getRecipeCount).Methods("GET")
 	// This general route must come AFTER more specific routes
 	r.HandleFunc("/api/recipes/{id}", getRecipe).Methods("GET")
 
@@ -84,6 +86,24 @@ func main() {
 
 	fmt.Printf("Server starting on port %s...\n", port)
 	log.Fatal(http.ListenAndServe(":"+port, handler))
+}
+
+// Get total count of recipes
+func getRecipeCount(w http.ResponseWriter, r *http.Request) {
+	// Create a count service
+	count, err := client.Count().
+		Index(IndexName).
+		Do(context.Background())
+
+	if err != nil {
+		log.Printf("Error getting recipe count: %s", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return the count directly
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(strconv.FormatInt(count, 10)))
 }
 
 // Get all recipes

@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
-	"math"
 	"net/url"
 	"regexp"
 	"search-engine-indexer/src/logger"
@@ -147,14 +145,16 @@ func NewElasticSearchClient() *elastic.Client {
 	}
 
 	if !connected {
-		log.Fatalf("Failed to connect to Elasticsearch after %d attempts", maxRetries)
+		logger.WriteWarning(fmt.Sprintf("Failed to connect to Elasticsearch after %d attempts", maxRetries))
+		return nil
 	}
 
 	// Getting the ES version number is quite common, so there's a shortcut
 	esversion, err := client.ElasticsearchVersion("http://192.168.1.78:9200")
 	if err != nil {
 		// Handle error
-		panic(err)
+		logger.WriteWarning(fmt.Sprintf("Failed to get Elasticsearch version: %v", err))
+		return nil
 	}
 	logger.WriteInfo(fmt.Sprintf("Connected to Elasticsearch version %s", esversion))
 
@@ -203,6 +203,498 @@ func DeleteIndex() {
 		logger.WriteWarning("DeleteIndex was not acknowledged. Check that timeout value is correct.")
 	}
 	logger.WriteInfo(fmt.Sprintf("Index %s deleted", IndexName))
+}
+
+// Helper function to extract domain from URL path
+func extractDomainFromURL(urlPath string) string {
+	// Map of known domains based on URL path patterns
+	domainPatterns := map[string]string{
+		"/cooking/recipe-ideas/": "https://www.delish.com",
+		"/recipes/":              "https://www.foodnetwork.com", // Default for common pattern
+		"/recipe/":               "https://www.allrecipes.com",  // Default for common pattern
+	}
+
+	for pattern, domain := range domainPatterns {
+		if strings.Contains(urlPath, pattern) {
+			return domain
+		}
+	}
+
+	return ""
+}
+
+// Helper function to extract source site from URL
+func extractSourceSite(urlStr string) string {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return ""
+	}
+	return parsedURL.Host
+}
+
+// isValidRecipeURL checks if a URL is a valid recipe URL
+func isValidRecipeURL(rawURL string) bool {
+	// List of allowed recipe domains - expanded
+	allowedDomains := []string{
+		"www.delish.com",
+		"www.allrecipes.com",
+		"allrecipes.com", // Some may not have www prefix
+		"www.foodnetwork.com",
+		"www.epicurious.com",
+		"www.simplyrecipes.com",
+		"www.bonappetit.com",
+		"www.taste.com.au",
+		"www.bbcgoodfood.com",
+		"www.eatingwell.com",
+		"www.seriouseats.com",
+		"cooking.nytimes.com",
+		"www.tasteofhome.com",
+		"www.food.com",
+		"www.yummly.com",
+		"thepioneerwoman.com",
+		"minimalistbaker.com",
+		"pinchofyum.com",
+		"www.budgetbytes.com",
+		"sallysbakingaddiction.com",
+		"www.recipetineats.com",
+		"www.gimmesomeoven.com",
+		"damndelicious.net",
+		"www.marthastewart.com",
+		"www.myrecipes.com",
+		"www.101cookbooks.com",
+		"www.skinnytaste.com",
+		"cookieandkate.com",
+		"smittenkitchen.com",
+	}
+
+	// Parse the URL
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+
+	// Extract host without www. prefix for consistent matching
+	host := parsedURL.Host
+	if strings.HasPrefix(host, "www.") {
+		host = host[4:]
+	}
+
+	// Check if domain is in allowed list
+	domainValid := false
+	for _, domain := range allowedDomains {
+		// Remove www. from the domain for consistent matching
+		allowedHost := domain
+		if strings.HasPrefix(allowedHost, "www.") {
+			allowedHost = allowedHost[4:]
+		}
+
+		if host == allowedHost || parsedURL.Host == domain {
+			domainValid = true
+			break
+		}
+	}
+
+	if !domainValid {
+		return false
+	}
+
+	// Map of domain-specific validation patterns - expanded
+	validPathPatterns := map[string][]string{
+		"delish.com":                {"/cooking/recipe-ideas/", "/recipe/", "/recipes/"},
+		"allrecipes.com":            {"/recipe/", "/recipes/", "/gallery/"},
+		"foodnetwork.com":           {"/recipes/", "/recipe/", "/fn-dish/"},
+		"epicurious.com":            {"/recipes/", "/recipe/", "/food/views/"},
+		"simplyrecipes.com":         {"/recipes/", "/"},
+		"bonappetit.com":            {"/recipe/", "/recipes/", "/story/"},
+		"taste.com.au":              {"/recipes/", "/recipe/"},
+		"bbcgoodfood.com":           {"/recipes/", "/recipe/"},
+		"eatingwell.com":            {"/recipe/", "/recipes/"},
+		"seriouseats.com":           {"/recipes/", "/"},
+		"cooking.nytimes.com":       {"/recipes/", "/"},
+		"tasteofhome.com":           {"/recipes/", "/recipe/"},
+		"food.com":                  {"/recipe/", "/recipes/"},
+		"yummly.com":                {"/recipe/", "/recipes/"},
+		"thepioneerwoman.com":       {"/food-cooking/recipes/", "/food-cooking/"},
+		"minimalistbaker.com":       {"/recipes/", "/recipe/"},
+		"pinchofyum.com":            {"/recipe/", "/"},
+		"budgetbytes.com":           {"/recipes/", "/recipe/"},
+		"sallysbakingaddiction.com": {"/recipe/", "/"},
+		"recipetineats.com":         {"/recipes/", "/recipe/", "/"},
+		"gimmesomeoven.com":         {"/"},
+		"damndelicious.net":         {"/recipe/", "/"},
+		"marthastewart.com":         {"/recipe/", "/recipes/"},
+		"myrecipes.com":             {"/recipe/", "/recipes/"},
+		"101cookbooks.com":          {"/recipes/", "/recipe/"},
+		"skinnytaste.com":           {"/recipe/", "/recipes/"},
+		"cookieandkate.com":         {"/recipe/", "/"},
+		"smittenkitchen.com":        {"/recipe/", "/"},
+	}
+
+	// Extract the host part without www. for consistent matching
+	hostForPatterns := parsedURL.Host
+	if strings.HasPrefix(hostForPatterns, "www.") {
+		hostForPatterns = hostForPatterns[4:]
+	}
+
+	// Check domain-specific path patterns
+	patterns, exists := validPathPatterns[hostForPatterns]
+	if !exists {
+		// If we don't have specific patterns, check if path has common recipe indicators
+		path := parsedURL.Path
+		commonRecipePatterns := []string{"/recipe/", "/recipes/", "-recipe", "recipe-"}
+		for _, pattern := range commonRecipePatterns {
+			if strings.Contains(path, pattern) {
+				return true
+			}
+		}
+		return false
+	}
+
+	path := parsedURL.Path
+	for _, pattern := range patterns {
+		if strings.Contains(path, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isLikelyRecipePage does a best-effort check to see if a URL likely leads to a recipe page
+func isLikelyRecipePage(urlStr string) bool {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return false
+	}
+
+	path := parsedURL.Path
+
+	// Recipe indicators in the URL path
+	recipeIndicators := []string{
+		"/recipe/",
+		"/recipes/",
+		"-recipe",
+		"recipe-",
+		"-recipes",
+		"recipes-",
+		"/cook/",
+		"how-to-make",
+		"how-to-cook",
+		"best-ever",
+		"easy-",
+		"-cake",
+		"-soup",
+		"-salad",
+		"-pie",
+		"-bread",
+		"-cookie",
+		"-meal",
+		"-dinner",
+		"-breakfast",
+		"-lunch",
+		"-dessert",
+		"-sandwich",
+		"-pizza",
+		"-pasta",
+	}
+
+	for _, indicator := range recipeIndicators {
+		if strings.Contains(path, indicator) {
+			return true
+		}
+	}
+
+	// Check if URL has a numeric ID which is common for recipe pages
+	recipeIdPattern := regexp.MustCompile(`/\d+(/|$)`)
+	if recipeIdPattern.MatchString(path) {
+		return true
+	}
+
+	// Check for specific patterns we know lead to recipe detail pages
+	host := parsedURL.Host
+	// Remove www. for consistent matching
+	if strings.HasPrefix(host, "www.") {
+		host = host[4:]
+	}
+
+	switch host {
+	case "allrecipes.com":
+		// AllRecipes has URLs like /recipe/12345/chocolate-cake/
+		if strings.Contains(path, "/recipe/") && strings.Count(path, "/") >= 3 {
+			return true
+		}
+	case "foodnetwork.com":
+		// FoodNetwork has URLs like /recipes/food-network-kitchens/chocolate-cake-recipe-2109090
+		if strings.Contains(path, "/recipes/") && strings.Count(path, "/") >= 3 {
+			return true
+		}
+	case "epicurious.com":
+		// Epicurious has URLs like /recipes/food/views/chocolate-cake-107885
+		if strings.Contains(path, "/food/views/") {
+			return true
+		}
+	case "simplyrecipes.com":
+		// Simply Recipes has URLs like /recipes/chocolate-cake/
+		if strings.Count(path, "/") >= 2 && !strings.HasSuffix(path, "/recipes/") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// existingURL checks if a URL already exists in the database with error handling
+func existingURL(urlToCheck string) (bool, error) {
+	ctx := context.Background()
+
+	// Create a bool query to check for exact URL match
+	q := elastic.NewBoolQuery().
+		Must(elastic.NewTermQuery("url.keyword", urlToCheck))
+
+	// Execute the search with error handling
+	result, err := client.Search().
+		Index(IndexName).
+		Query(q).
+		Size(1).
+		Do(ctx)
+
+	if err != nil {
+		return false, err
+	}
+
+	// Check if any results were found
+	hits := result.TotalHits()
+	return hits > 0, nil
+}
+
+// CreatePage creates a new page in Elasticsearch with more flexible validation
+func CreatePage(p structs.Page) bool {
+	ctx := context.Background()
+
+	// More flexible required field validation
+	if p.Title == "" && p.Name == "" {
+		logger.WriteWarning(fmt.Sprintf("Cannot create page, missing both title and name: %s", p.URL))
+		return false
+	}
+
+	// If title is missing but name exists, use name as title
+	if p.Title == "" {
+		p.Title = p.Name
+		logger.WriteInfo(fmt.Sprintf("Using name as title for URL: %s", p.URL))
+	}
+
+	// If name is missing but title exists, use title as name
+	if p.Name == "" {
+		p.Name = p.Title
+		logger.WriteInfo(fmt.Sprintf("Using title as name for URL: %s", p.URL))
+	}
+
+	// Allow empty ingredients if body contains ingredient-related text
+	hasIngredientText := p.Ingredients != "" ||
+		strings.Contains(strings.ToLower(p.Body), "ingredient") ||
+		strings.Contains(p.Body, "Ingredient")
+
+	// Allow empty instructions if body contains instruction-related text
+	instructionKeywords := []string{"instructions", "directions", "steps", "method", "preparation"}
+	hasInstructionText := p.Instructions != ""
+
+	if !hasInstructionText {
+		for _, keyword := range instructionKeywords {
+			if strings.Contains(strings.ToLower(p.Body), keyword) ||
+				strings.Contains(p.Body, strings.Title(keyword)) {
+				hasInstructionText = true
+				break
+			}
+		}
+	}
+
+	// Check minimum required data with more flexibility
+	if !hasIngredientText || !hasInstructionText {
+		// Special case for allrecipes.com - they have a specific structure
+		if strings.Contains(p.URL, "allrecipes.com") {
+			// For allrecipes, if we have the URL and title/name, let's assume it's valid
+			// and create a placeholder for missing data
+			if p.Ingredients == "" && hasIngredientText {
+				p.Ingredients = "Ingredients mentioned in page but not structured"
+				logger.WriteInfo(fmt.Sprintf("Created placeholder ingredients for AllRecipes URL: %s", p.URL))
+			}
+
+			if p.Instructions == "" && hasInstructionText {
+				p.Instructions = "Instructions mentioned in page but not structured"
+				logger.WriteInfo(fmt.Sprintf("Created placeholder instructions for AllRecipes URL: %s", p.URL))
+			}
+		} else {
+			// For other sites, still enforce basic validation
+			if !hasIngredientText {
+				logger.WriteWarning(fmt.Sprintf("Cannot create page, missing ingredients: %s", p.URL))
+				return false
+			}
+
+			if !hasInstructionText {
+				logger.WriteWarning(fmt.Sprintf("Cannot create page, missing instructions: %s", p.URL))
+				return false
+			}
+		}
+	}
+
+	// Convert relative URL to absolute if needed
+	if strings.HasPrefix(p.URL, "/") {
+		// Extract domain from context or use a default one
+		domain := extractDomainFromURL(p.URL)
+		if domain == "" {
+			domain = "https://www.example.com" // Fallback
+		}
+		p.URL = domain + p.URL
+		logger.WriteInfo(fmt.Sprintf("Converted relative URL to absolute: %s", p.URL))
+	}
+
+	// Improved URL validation for recipe sites
+	if !isValidRecipeURL(p.URL) {
+		// If URL doesn't match standard patterns but appears to be a recipe, allow it
+		if isLikelyRecipePage(p.URL) {
+			logger.WriteInfo(fmt.Sprintf("URL doesn't match standard patterns but appears to be a recipe: %s", p.URL))
+		} else {
+			logger.WriteWarning(fmt.Sprintf("Invalid recipe URL format: %s", p.URL))
+			return false
+		}
+	}
+
+	// Set source site from URL
+	p.SourceSite = extractSourceSite(p.URL)
+
+	// Set crawl date to current time
+	p.CrawlDate = time.Now()
+
+	// Check if URL already exists - with improved error handling
+	urlExists, err := existingURL(p.URL)
+	if err != nil {
+		logger.WriteWarning(fmt.Sprintf("Error checking if URL exists: %v - proceeding anyway", err))
+	} else if urlExists {
+		logger.WriteWarning(fmt.Sprintf("URL already exists in database: %s", p.URL))
+		return false
+	}
+
+	// Less stringent validation of extracted data length
+	// We still want some basic data, but we'll be more lenient
+	if len(p.Ingredients) < 5 && !strings.Contains(p.Ingredients, "placeholder") {
+		logger.WriteWarning(fmt.Sprintf("Ingredients seem unusually short: %s", p.Title))
+		// But proceed anyway - don't return false
+	}
+
+	if len(p.Instructions) < 10 && !strings.Contains(p.Instructions, "placeholder") {
+		logger.WriteWarning(fmt.Sprintf("Instructions seem unusually short: %s", p.Title))
+		// But proceed anyway - don't return false
+	}
+
+	// Create the new page with refresh to ensure immediate visibility
+	_, err = client.Index().
+		Index(IndexName).
+		Id(p.ID).
+		Refresh("true").
+		BodyJson(p).
+		Do(ctx)
+
+	if err != nil {
+		logger.WriteWarning(fmt.Sprintf("Failed to create the page: %v", err))
+		return false
+	}
+
+	logger.WriteInfo(fmt.Sprintf("Successfully created new recipe - Title: %s, URL: %s", p.Title, p.URL))
+	return true
+}
+
+// UpdatePage updates an existing page in Elasticsearch
+func UpdatePage(id string, params map[string]interface{}) bool {
+	ctx := context.Background()
+
+	// Validate required fields
+	if _, ok := params["title"].(string); !ok || params["title"].(string) == "" {
+		logger.WriteWarning("Cannot update page, missing title")
+		return false
+	}
+
+	// If URL is being updated, validate it
+	if url, ok := params["url"].(string); ok {
+		// Convert relative URL to absolute if needed
+		if strings.HasPrefix(url, "/") {
+			domain := extractDomainFromURL(url)
+			if domain == "" {
+				domain = "https://www.example.com" // Fallback
+			}
+			url = domain + url
+			params["url"] = url
+		}
+
+		if !isValidRecipeURL(url) {
+			logger.WriteWarning(fmt.Sprintf("Invalid URL format: %s", url))
+			return false
+		}
+
+		// Set source site from URL
+		params["source_site"] = extractSourceSite(url)
+
+		// Get the current document to compare URLs
+		currentDoc, err := client.Get().
+			Index(IndexName).
+			Id(id).
+			Do(ctx)
+
+		if err != nil {
+			logger.WriteWarning(fmt.Sprintf("Failed to get current document: %v", err))
+			return false
+		}
+
+		var currentPage structs.Page
+		if err := json.Unmarshal(currentDoc.Source, &currentPage); err != nil {
+			logger.WriteWarning(fmt.Sprintf("Failed to unmarshal current page: %v", err))
+			return false
+		}
+
+		// Only check for existing URL if it's different from the current URL
+		if currentPage.URL != url {
+			logger.WriteInfo(fmt.Sprintf("Checking if new URL exists: %s", url))
+			urlExists, err := existingURL(url)
+			if err != nil {
+				logger.WriteWarning(fmt.Sprintf("Error checking if URL exists: %v - proceeding anyway", err))
+			} else if urlExists {
+				logger.WriteWarning(fmt.Sprintf("URL already exists in another document, skipping update: %s", url))
+				return false
+			}
+		}
+	}
+
+	// More flexible validation for ingredients and instructions
+	if ingredients, ok := params["ingredients"].(string); ok && ingredients == "" {
+		// If ingredients is provided but empty, add a placeholder
+		params["ingredients"] = "Ingredients mentioned in page but not structured"
+		logger.WriteInfo("Created placeholder ingredients for update")
+	}
+
+	if instructions, ok := params["instructions"].(string); ok && instructions == "" {
+		// If instructions is provided but empty, add a placeholder
+		params["instructions"] = "Instructions mentioned in page but not structured"
+		logger.WriteInfo("Created placeholder instructions for update")
+	}
+
+	// Update crawl_date
+	params["crawl_date"] = time.Now()
+
+	// Perform the update with refresh to ensure immediate visibility
+	_, err := client.Update().
+		Index(IndexName).
+		Id(id).
+		Doc(params).
+		Refresh("true").
+		RetryOnConflict(3).
+		Do(ctx)
+
+	if err != nil {
+		logger.WriteWarning(fmt.Sprintf("Failed to update the page: %v", err))
+		return false
+	}
+
+	logger.WriteInfo(fmt.Sprintf("Successfully updated page with ID: %s", id))
+	return true
 }
 
 // ExistingPage return a boolean and a page if the title is already
@@ -282,78 +774,29 @@ func normalizeTitle(title string) string {
 	return strings.TrimSpace(normalized)
 }
 
-// isValidRecipeURL checks if a URL is a valid recipe URL
-func isValidRecipeURL(rawURL string) bool {
-	// List of allowed recipe domains
-	allowedDomains := []string{
-		"www.delish.com",
-		"www.allrecipes.com",
-		"www.foodnetwork.com",
-		"www.epicurious.com",
-		"www.simplyrecipes.com",
-		// Add more sites as needed
-	}
-
-	// Parse the URL
-	parsedURL, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-
-	// Check if domain is in allowed list
-	domainValid := false
-	for _, domain := range allowedDomains {
-		if parsedURL.Host == domain {
-			domainValid = true
-			break
-		}
-	}
-
-	if !domainValid {
-		return false
-	}
-
-	// Map of domain-specific validation patterns
-	validPathPatterns := map[string][]string{
-		"www.delish.com":        {"/cooking/recipe-ideas/", "/recipe/", "/recipes/"},
-		"www.allrecipes.com":    {"/recipe/", "/recipes/"},
-		"www.foodnetwork.com":   {"/recipes/", "/recipe/"},
-		"www.epicurious.com":    {"/recipes/", "/recipe/"},
-		"www.simplyrecipes.com": {"/recipes/"},
-		// Add more patterns as needed
-	}
-
-	// Check domain-specific path patterns
-	patterns, exists := validPathPatterns[parsedURL.Host]
-	if !exists {
-		return false
-	}
-
-	path := parsedURL.Path
-	for _, pattern := range patterns {
-		if strings.Contains(path, pattern) {
-			return true
-		}
-	}
-
-	return false
-}
-
 // calculateTitleSimilarity calculates the similarity between two titles
 func calculateTitleSimilarity(title1, title2 string) float64 {
 	// Normalize both titles
 	norm1 := normalizeTitle(title1)
 	norm2 := normalizeTitle(title2)
 
-	// Simple Levenshtein distance calculation
+	// Use Levenshtein distance for similarity
 	distance := levenshteinDistance(norm1, norm2)
-	maxLength := math.Max(float64(len(norm1)), float64(len(norm2)))
+	maxLength := float64(max(len(norm1), len(norm2)))
 
 	if maxLength == 0 {
 		return 1.0
 	}
 
 	return 1.0 - float64(distance)/maxLength
+}
+
+// max returns the maximum of two integers
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // Levenshtein distance implementation
@@ -394,345 +837,10 @@ func levenshteinDistance(s1, s2 string) int {
 	return d[len(s1)][len(s2)]
 }
 
+// min returns the minimum of two integers
 func min(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
-}
-
-// existingURL checks if a URL already exists in the database
-func existingURL(urlToCheck string) bool {
-	ctx := context.Background()
-
-	// Create a bool query to check for exact URL match
-	q := elastic.NewBoolQuery().
-		Must(elastic.NewTermQuery("url.keyword", urlToCheck))
-
-	// Execute the search
-	result, err := client.Search().
-		Index(IndexName).
-		Query(q).
-		Size(1).
-		Do(ctx)
-
-	if err != nil {
-		logger.WriteWarning(fmt.Sprintf("Failed to check for existing URL: %v", err))
-		return false
-	}
-
-	// Check if any results were found
-	hits := result.TotalHits()
-	return hits > 0
-}
-
-// Helper function to extract source site from URL
-func extractSourceSite(urlStr string) string {
-	parsedURL, err := url.Parse(urlStr)
-	if err != nil {
-		return ""
-	}
-	return parsedURL.Host
-}
-
-// Helper function to extract domain from URL
-func extractDomainFromURL(urlPath string) string {
-	// Map of known domains based on URL path patterns
-	domainPatterns := map[string]string{
-		"/cooking/recipe-ideas/": "https://www.delish.com",
-		"/recipes/":              "https://www.foodnetwork.com", // Default for common pattern
-		"/recipe/":               "https://www.allrecipes.com",  // Default for common pattern
-	}
-
-	for pattern, domain := range domainPatterns {
-		if strings.Contains(urlPath, pattern) {
-			return domain
-		}
-	}
-
-	return ""
-}
-
-// CreatePage creates a new page in Elasticsearch
-func CreatePage(p structs.Page) bool {
-	ctx := context.Background()
-
-	// Validate required fields
-	if p.Title == "" || p.Name == "" || p.Ingredients == "" || p.Instructions == "" {
-		logger.WriteWarning(fmt.Sprintf("Cannot create page, missing required fields: %s", p.URL))
-		return false
-	}
-
-	// Convert relative URL to absolute if needed
-	if strings.HasPrefix(p.URL, "/") {
-		// Extract domain from context or use a default one
-		domain := extractDomainFromURL(p.URL)
-		if domain == "" {
-			domain = "https://www.example.com" // Fallback
-		}
-		p.URL = domain + p.URL
-	}
-
-	// Validate URL format for any supported recipe site
-	if !isValidRecipeURL(p.URL) {
-		logger.WriteWarning(fmt.Sprintf("Invalid recipe URL format: %s", p.URL))
-		return false
-	}
-
-	// Set source site from URL
-	p.SourceSite = extractSourceSite(p.URL)
-
-	// Set crawl date to current time
-	p.CrawlDate = time.Now()
-
-	// Check if URL already exists
-	if existingURL(p.URL) {
-		logger.WriteWarning(fmt.Sprintf("URL already exists in database: %s", p.URL))
-		return false
-	}
-
-	// Basic validation of extracted data
-	if len(p.Ingredients) < 10 || len(p.Instructions) < 20 {
-		logger.WriteWarning(fmt.Sprintf("Recipe data seems incomplete: %s", p.Title))
-		return false
-	}
-
-	// Create the new page with refresh to ensure immediate visibility
-	_, err := client.Index().
-		Index(IndexName).
-		Id(p.ID).
-		Refresh("true").
-		BodyJson(p).
-		Do(ctx)
-
-	if err != nil {
-		logger.WriteWarning(fmt.Sprintf("Failed to create the page: %v", err))
-		return false
-	}
-
-	logger.WriteInfo(fmt.Sprintf("Successfully created new recipe - Title: %s, URL: %s", p.Title, p.URL))
-	return true
-}
-
-// UpdatePage updates an existing page in Elasticsearch
-func UpdatePage(id string, params map[string]interface{}) bool {
-	ctx := context.Background()
-
-	// Validate required fields
-	if _, ok := params["title"].(string); !ok || params["title"].(string) == "" {
-		logger.WriteWarning("Cannot update page, missing title")
-		return false
-	}
-
-	// If URL is being updated, validate it
-	if url, ok := params["url"].(string); ok {
-		// Convert relative URL to absolute if needed
-		if strings.HasPrefix(url, "/") {
-			domain := extractDomainFromURL(url)
-			if domain == "" {
-				domain = "https://www.example.com" // Fallback
-			}
-			url = domain + url
-			params["url"] = url
-		}
-
-		if !isValidRecipeURL(url) {
-			logger.WriteWarning(fmt.Sprintf("Invalid URL format: %s", url))
-			return false
-		}
-
-		// Set source site from URL
-		params["source_site"] = extractSourceSite(url)
-
-		// Get the current document to compare URLs
-		currentDoc, err := client.Get().
-			Index(IndexName).
-			Id(id).
-			Do(ctx)
-
-		if err != nil {
-			logger.WriteWarning(fmt.Sprintf("Failed to get current document: %v", err))
-			return false
-		}
-
-		var currentPage structs.Page
-		if err := json.Unmarshal(currentDoc.Source, &currentPage); err != nil {
-			logger.WriteWarning(fmt.Sprintf("Failed to unmarshal current page: %v", err))
-			return false
-		}
-
-		// Only check for existing URL if it's different from the current URL
-		if currentPage.URL != url {
-			logger.WriteInfo(fmt.Sprintf("Checking if new URL exists: %s", url))
-			if existingURL(url) {
-				logger.WriteWarning(fmt.Sprintf("URL already exists in another document, skipping update: %s", url))
-				return false
-			}
-		}
-	}
-
-	// Validate ingredients and instructions
-	if ingredients, ok := params["ingredients"].(string); ok && len(ingredients) < 10 {
-		logger.WriteWarning("Ingredients data seems incomplete, skipping update")
-		return false
-	}
-
-	if instructions, ok := params["instructions"].(string); ok && len(instructions) < 20 {
-		logger.WriteWarning("Instructions data seems incomplete, skipping update")
-		return false
-	}
-
-	// Update crawl_date
-	params["crawl_date"] = time.Now()
-
-	// Perform the update with refresh to ensure immediate visibility
-	_, err := client.Update().
-		Index(IndexName).
-		Id(id).
-		Doc(params).
-		Refresh("true").
-		RetryOnConflict(3).
-		Do(ctx)
-
-	if err != nil {
-		logger.WriteWarning(fmt.Sprintf("Failed to update the page: %v", err))
-		return false
-	}
-
-	logger.WriteInfo(fmt.Sprintf("Successfully updated page with ID: %s", id))
-	return true
-}
-
-// SearchRecipes performs a search for recipes with the given query
-func SearchRecipes(query string, from, size int) ([]structs.Page, int64, error) {
-	ctx := context.Background()
-
-	// Create a multi-match query for broader search
-	multiMatchQuery := elastic.NewMultiMatchQuery(query,
-		"title^3",         // Boost title matches
-		"name^2",          // Boost name matches
-		"ingredients^1.5", // Boost ingredient matches
-		"description",
-		"instructions",
-	).Type("best_fields").Fuzziness("AUTO")
-
-	// Create a search query
-	searchQuery := elastic.NewBoolQuery().
-		Should(multiMatchQuery).
-		MinimumShouldMatch("1")
-
-	// Execute the search
-	result, err := client.Search().
-		Index(IndexName).
-		Query(searchQuery).
-		From(from).
-		Size(size).
-		Sort("_score", false). // Sort by relevance
-		Do(ctx)
-
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// Parse the search results
-	var recipes []structs.Page
-	for _, hit := range result.Hits.Hits {
-		var recipe structs.Page
-		err := json.Unmarshal(hit.Source, &recipe)
-		if err != nil {
-			logger.WriteWarning(fmt.Sprintf("Failed to unmarshal recipe: %v", err))
-			continue
-		}
-		recipes = append(recipes, recipe)
-	}
-
-	return recipes, result.TotalHits(), nil
-}
-
-// GetRecentRecipes gets the most recently crawled recipes
-func GetRecentRecipes(limit int) ([]structs.Page, error) {
-	ctx := context.Background()
-
-	// Query for all recipes, sorted by crawl date
-	searchQuery := elastic.NewMatchAllQuery()
-
-	// Execute the search
-	result, err := client.Search().
-		Index(IndexName).
-		Query(searchQuery).
-		Sort("crawl_date", false). // Sort by crawl date, newest first
-		Size(limit).
-		Do(ctx)
-
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the search results
-	var recipes []structs.Page
-	for _, hit := range result.Hits.Hits {
-		var recipe structs.Page
-		err := json.Unmarshal(hit.Source, &recipe)
-		if err != nil {
-			logger.WriteWarning(fmt.Sprintf("Failed to unmarshal recipe: %v", err))
-			continue
-		}
-		recipes = append(recipes, recipe)
-	}
-
-	return recipes, nil
-}
-
-// FindSimilarRecipes finds recipes similar to the given recipe ID
-func FindSimilarRecipes(recipeID string, limit int) ([]structs.Page, error) {
-	ctx := context.Background()
-
-	// First get the recipe
-	getResult, err := client.Get().
-		Index(IndexName).
-		Id(recipeID).
-		Do(ctx)
-
-	if err != nil {
-		return nil, err
-	}
-
-	var recipe structs.Page
-	if err := json.Unmarshal(getResult.Source, &recipe); err != nil {
-		return nil, err
-	}
-
-	// Create a query based on recipe ingredients and title
-	titleQuery := elastic.NewMatchQuery("title", recipe.Title).Boost(1.5)
-	ingredientsQuery := elastic.NewMatchQuery("ingredients", recipe.Ingredients).Boost(2)
-
-	searchQuery := elastic.NewBoolQuery().
-		Should(titleQuery, ingredientsQuery).
-		MustNot(elastic.NewIdsQuery().Ids(recipeID)). // Exclude the recipe itself
-		MinimumShouldMatch("1")
-
-	// Execute the search
-	result, err := client.Search().
-		Index(IndexName).
-		Query(searchQuery).
-		Size(limit).
-		Do(ctx)
-
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the search results
-	var recipes []structs.Page
-	for _, hit := range result.Hits.Hits {
-		var similarRecipe structs.Page
-		err := json.Unmarshal(hit.Source, &similarRecipe)
-		if err != nil {
-			logger.WriteWarning(fmt.Sprintf("Failed to unmarshal recipe: %v", err))
-			continue
-		}
-		recipes = append(recipes, similarRecipe)
-	}
-
-	return recipes, nil
 }
