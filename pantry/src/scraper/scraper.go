@@ -232,13 +232,37 @@ func (s *Scraper) MetaDataInformation() (string, string) {
 func (s *Scraper) GetRecipeIngredients() string {
 	var ingredients []string
 
-	// Try schema.org ingredients
-	s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='recipeIngredient'], [itemtype='http://schema.org/Recipe'] [itemprop='ingredients'], [itemscope] [itemprop='recipeIngredient'], [itemscope] [itemprop='ingredients']").Each(func(i int, item *goquery.Selection) {
-		ingredient := strings.TrimSpace(item.Text())
-		if ingredient != "" {
-			ingredients = append(ingredients, ingredient)
+	switch {
+	case strings.Contains(s.site, "allrecipes.com"):
+		// Check for ingredients in structured lists - most common in Allrecipes
+		s.doc.Find(".ingredients-item-name, .ingredients-item, .checklist__item, .mntl-structured-ingredients__list-item").Each(func(i int, item *goquery.Selection) {
+			ingredient := strings.TrimSpace(item.Text())
+			if ingredient != "" {
+				ingredients = append(ingredients, ingredient)
+			}
+		})
+
+		// Try the newer structured ingredients format (as of 2025)
+		if len(ingredients) == 0 {
+			s.doc.Find(".mm-recipes-structured-ingredients__list-item p").Each(func(i int, item *goquery.Selection) {
+				ingredient := strings.TrimSpace(item.Text())
+				if ingredient != "" {
+					ingredients = append(ingredients, ingredient)
+				}
+			})
 		}
-	})
+	}
+
+	// If still no ingredients, try schema.org approach
+	if len(ingredients) == 0 {
+		// Try schema.org ingredients
+		s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='recipeIngredient'], [itemtype='http://schema.org/Recipe'] [itemprop='ingredients'], [itemscope] [itemprop='recipeIngredient'], [itemscope] [itemprop='ingredients']").Each(func(i int, item *goquery.Selection) {
+			ingredient := strings.TrimSpace(item.Text())
+			if ingredient != "" {
+				ingredients = append(ingredients, ingredient)
+			}
+		})
+	}
 
 	// Try LD+JSON schema for ingredients
 	if len(ingredients) == 0 {
@@ -384,14 +408,10 @@ func (s *Scraper) GetRecipeIngredients() string {
 
 	// More aggressive fallback - find any list in a section that appears to be ingredients
 	if len(ingredients) == 0 {
-		// var inIngredientsSection bool
-
 		// Look for section headings
 		s.doc.Find("h1, h2, h3, h4, h5, h6").Each(func(i int, item *goquery.Selection) {
 			headingText := strings.ToLower(strings.TrimSpace(item.Text()))
 			if strings.Contains(headingText, "ingredient") {
-				// inIngredientsSection = true
-
 				// Look for list items in the next sibling elements
 				item.NextAll().EachWithBreak(func(j int, sibling *goquery.Selection) bool {
 					// Stop if we hit another heading
@@ -442,25 +462,55 @@ func (s *Scraper) GetRecipeIngredients() string {
 func (s *Scraper) GetRecipeInstructions() string {
 	var instructions []string
 
-	// Try schema.org instructions
-	s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='recipeInstructions'], [itemscope] [itemprop='recipeInstructions']").Each(func(i int, item *goquery.Selection) {
-		// Check if this is a container with multiple steps
-		steps := item.Find("li, .step")
-		if steps.Length() > 0 {
-			steps.Each(func(j int, step *goquery.Selection) {
-				instruction := strings.TrimSpace(step.Text())
+	switch {
+	case strings.Contains(s.site, "allrecipes.com"):
+		// Check for instructions in Allrecipes specific structure
+		s.doc.Find(".step, .instructions-section-item, .recipe-directions__list--item, .step-item, .mntl-sc-block-group--LI").Each(func(i int, item *goquery.Selection) {
+			// For newer Allrecipes structure, get the text from paragraph inside step
+			instructionText := ""
+			paragraphs := item.Find("p")
+			if paragraphs.Length() > 0 {
+				paragraphs.Each(func(j int, p *goquery.Selection) {
+					text := strings.TrimSpace(p.Text())
+					if text != "" {
+						if instructionText != "" {
+							instructionText += " "
+						}
+						instructionText += text
+					}
+				})
+			} else {
+				instructionText = strings.TrimSpace(item.Text())
+			}
+
+			if instructionText != "" {
+				instructions = append(instructions, instructionText)
+			}
+		})
+	}
+
+	// If still no instructions, try schema.org approach
+	if len(instructions) == 0 {
+		// Try schema.org instructions
+		s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='recipeInstructions'], [itemscope] [itemprop='recipeInstructions']").Each(func(i int, item *goquery.Selection) {
+			// Check if this is a container with multiple steps
+			steps := item.Find("li, .step")
+			if steps.Length() > 0 {
+				steps.Each(func(j int, step *goquery.Selection) {
+					instruction := strings.TrimSpace(step.Text())
+					if instruction != "" {
+						instructions = append(instructions, instruction)
+					}
+				})
+			} else {
+				// Single instruction text
+				instruction := strings.TrimSpace(item.Text())
 				if instruction != "" {
 					instructions = append(instructions, instruction)
 				}
-			})
-		} else {
-			// Single instruction text
-			instruction := strings.TrimSpace(item.Text())
-			if instruction != "" {
-				instructions = append(instructions, instruction)
 			}
-		}
-	})
+		})
+	}
 
 	// Try LD+JSON schema for instructions - complex version handling multiple formats
 	if len(instructions) == 0 {
@@ -623,8 +673,6 @@ func (s *Scraper) GetRecipeInstructions() string {
 
 	// More aggressive fallback - find any list in a section that appears to be instructions
 	if len(instructions) == 0 {
-		// var inInstructionsSection bool
-
 		// Look for section headings that indicate instructions
 		instructionKeywords := []string{"instruction", "direction", "method", "preparation", "steps", "how to"}
 
@@ -641,8 +689,6 @@ func (s *Scraper) GetRecipeInstructions() string {
 			}
 
 			if isInstructionHeading {
-				// inInstructionsSection = true
-
 				// Look for list items in the next sibling elements
 				item.NextAll().EachWithBreak(func(j int, sibling *goquery.Selection) bool {
 					// Stop if we hit another heading
@@ -863,6 +909,310 @@ func (s *Scraper) GetRecipeData() map[string]string {
 	return recipeData
 }
 
+// GetRecipeTime extracts prep and total time, then calculates cook time
+func (s *Scraper) GetRecipeTime() (string, string, string) {
+	var prepTime, cookTime, totalTime string
+
+	switch {
+	case strings.Contains(s.site, "allrecipes.com"):
+		// Try the Allrecipes specific format for times
+		s.doc.Find(".recipe-meta-item").Each(func(i int, item *goquery.Selection) {
+			headerText := item.Find(".recipe-meta-item-header").Text()
+			valueText := item.Find(".recipe-meta-item-body").Text()
+
+			headerText = strings.ToLower(strings.TrimSpace(headerText))
+			valueText = strings.TrimSpace(valueText)
+
+			if strings.Contains(headerText, "prep") || strings.Contains(headerText, "prep:") {
+				prepTime = valueText
+			} else if strings.Contains(headerText, "cook") || strings.Contains(headerText, "cook:") {
+				cookTime = valueText
+			} else if strings.Contains(headerText, "total") || strings.Contains(headerText, "total:") {
+				totalTime = valueText
+			}
+		})
+
+		// Try the newer structure (mm-recipes-details format)
+		if prepTime == "" || cookTime == "" || totalTime == "" {
+			s.doc.Find(".mm-recipes-details__item").Each(func(i int, item *goquery.Selection) {
+				label := item.Find(".mm-recipes-details__label").Text()
+				value := item.Find(".mm-recipes-details__value").Text()
+
+				label = strings.ToLower(strings.TrimSpace(label))
+				value = strings.TrimSpace(value)
+
+				if strings.Contains(label, "prep time") {
+					prepTime = value
+				} else if strings.Contains(label, "cook time") {
+					cookTime = value
+				} else if strings.Contains(label, "total time") {
+					totalTime = value
+				}
+			})
+		}
+	}
+
+	// If any times are still missing, try schema.org approach
+	if prepTime == "" {
+		s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='prepTime'], [itemscope] [itemprop='prepTime']").Each(func(i int, item *goquery.Selection) {
+			if i == 0 {
+				prepTime = item.AttrOr("content", "")
+				// Convert ISO duration to simple format if needed
+				if strings.HasPrefix(prepTime, "PT") {
+					prepTime = convertISODuration(prepTime)
+				} else if prepTime == "" {
+					prepTime = strings.TrimSpace(item.Text())
+				}
+			}
+		})
+	}
+
+	if cookTime == "" {
+		s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='cookTime'], [itemscope] [itemprop='cookTime']").Each(func(i int, item *goquery.Selection) {
+			if i == 0 {
+				cookTime = item.AttrOr("content", "")
+				// Convert ISO duration to simple format if needed
+				if strings.HasPrefix(cookTime, "PT") {
+					cookTime = convertISODuration(cookTime)
+				} else if cookTime == "" {
+					cookTime = strings.TrimSpace(item.Text())
+				}
+			}
+		})
+	}
+
+	if totalTime == "" {
+		s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='totalTime'], [itemscope] [itemprop='totalTime']").Each(func(i int, item *goquery.Selection) {
+			if i == 0 {
+				totalTime = item.AttrOr("content", "")
+				// Convert ISO duration to simple format if needed
+				if strings.HasPrefix(totalTime, "PT") {
+					totalTime = convertISODuration(totalTime)
+				} else if totalTime == "" {
+					totalTime = strings.TrimSpace(item.Text())
+				}
+			}
+		})
+	}
+
+	// Try LD+JSON schema for times
+	if prepTime == "" || cookTime == "" || totalTime == "" {
+		s.doc.Find("script[type='application/ld+json']").Each(func(i int, item *goquery.Selection) {
+			scriptContent := item.Text()
+			if strings.Contains(scriptContent, "Recipe") {
+				// Try to parse the JSON
+				var jsonMap map[string]interface{}
+				if err := json.Unmarshal([]byte(scriptContent), &jsonMap); err == nil {
+					// Check if this is a Recipe
+					if jsonType, ok := jsonMap["@type"].(string); ok && (jsonType == "Recipe" || strings.Contains(jsonType, "Recipe")) {
+						if prepTime == "" {
+							if pt, ok := jsonMap["prepTime"].(string); ok {
+								prepTime = convertISODuration(pt)
+							}
+						}
+
+						if cookTime == "" {
+							if ct, ok := jsonMap["cookTime"].(string); ok {
+								cookTime = convertISODuration(ct)
+							}
+						}
+
+						if totalTime == "" {
+							if tt, ok := jsonMap["totalTime"].(string); ok {
+								totalTime = convertISODuration(tt)
+							}
+						}
+					}
+				} else {
+					// Fallback to regex
+					if prepTime == "" {
+						re := regexp.MustCompile(`"prepTime"\s*:\s*"([^"]+)"`)
+						matches := re.FindStringSubmatch(scriptContent)
+						if len(matches) >= 2 {
+							prepTime = convertISODuration(matches[1])
+						}
+					}
+
+					if cookTime == "" {
+						re := regexp.MustCompile(`"cookTime"\s*:\s*"([^"]+)"`)
+						matches := re.FindStringSubmatch(scriptContent)
+						if len(matches) >= 2 {
+							cookTime = convertISODuration(matches[1])
+						}
+					}
+
+					if totalTime == "" {
+						re := regexp.MustCompile(`"totalTime"\s*:\s*"([^"]+)"`)
+						matches := re.FindStringSubmatch(scriptContent)
+						if len(matches) >= 2 {
+							totalTime = convertISODuration(matches[1])
+						}
+					}
+				}
+			}
+		})
+	}
+
+	// Site-specific time extraction for Delish.com
+	if (prepTime == "" || totalTime == "") && strings.Contains(s.site, "delish.com") {
+		s.doc.Find(".recipe-info-item, .prep-info").Each(func(i int, item *goquery.Selection) {
+			text := strings.ToLower(item.Text())
+
+			if strings.Contains(text, "prep") && prepTime == "" {
+				prepTime = extractTime(text)
+			} else if strings.Contains(text, "total") && totalTime == "" {
+				totalTime = extractTime(text)
+			}
+		})
+	}
+
+	// Generic fallback for recipe time metadata
+	if prepTime == "" || totalTime == "" || cookTime == "" {
+		// Extract times based on common recipe site patterns
+		s.doc.Find(".recipe-meta-item, .recipe-meta, .recipe-details, .recipe-info").Each(func(i int, item *goquery.Selection) {
+			text := strings.ToLower(item.Text())
+			if strings.Contains(text, "prep") && prepTime == "" {
+				prepTime = extractTime(text)
+			} else if strings.Contains(text, "cook") && cookTime == "" {
+				cookTime = extractTime(text)
+			} else if strings.Contains(text, "total") && totalTime == "" {
+				totalTime = extractTime(text)
+			}
+		})
+	}
+
+	// Calculate missing times if possible
+	if prepTime != "" && totalTime != "" && cookTime == "" {
+		cookTime = calculateCookTime(prepTime, totalTime)
+	} else if prepTime == "" && cookTime != "" && totalTime != "" {
+		// Try to calculate prep time from cook and total time
+		cookMinutes := extractMinutes(cookTime)
+		totalMinutes := extractMinutes(totalTime)
+		if cookMinutes > 0 && totalMinutes > 0 && totalMinutes >= cookMinutes {
+			prepMinutes := totalMinutes - cookMinutes
+			if prepMinutes >= 60 {
+				hours := prepMinutes / 60
+				minutes := prepMinutes % 60
+				if minutes > 0 {
+					prepTime = fmt.Sprintf("%d hr %d min", hours, minutes)
+				} else {
+					prepTime = fmt.Sprintf("%d hr", hours)
+				}
+			} else {
+				prepTime = fmt.Sprintf("%d min", prepMinutes)
+			}
+		}
+	} else if totalTime == "" && prepTime != "" && cookTime != "" {
+		// Calculate total time from prep and cook time
+		prepMinutes := extractMinutes(prepTime)
+		cookMinutes := extractMinutes(cookTime)
+		if prepMinutes > 0 && cookMinutes > 0 {
+			totalMinutes := prepMinutes + cookMinutes
+			if totalMinutes >= 60 {
+				hours := totalMinutes / 60
+				minutes := totalMinutes % 60
+				if minutes > 0 {
+					totalTime = fmt.Sprintf("%d hr %d min", hours, minutes)
+				} else {
+					totalTime = fmt.Sprintf("%d hr", hours)
+				}
+			} else {
+				totalTime = fmt.Sprintf("%d min", totalMinutes)
+			}
+		}
+	}
+
+	return prepTime, cookTime, totalTime
+}
+
+// GetRecipeYield extracts servings/yield specifically for Allrecipes
+func (s *Scraper) GetRecipeYield() string {
+	var servings string
+
+	switch {
+	case strings.Contains(s.site, "allrecipes.com"):
+		// Try recipe-meta-item format
+		s.doc.Find(".recipe-meta-item").Each(func(i int, item *goquery.Selection) {
+			headerText := item.Find(".recipe-meta-item-header").Text()
+			valueText := item.Find(".recipe-meta-item-body").Text()
+
+			headerText = strings.ToLower(strings.TrimSpace(headerText))
+			valueText = strings.TrimSpace(valueText)
+
+			if strings.Contains(headerText, "servings") ||
+				strings.Contains(headerText, "yield") ||
+				strings.Contains(headerText, "makes") {
+				servings = valueText
+			}
+		})
+
+		// Try the newer structure (mm-recipes-details format)
+		if servings == "" {
+			s.doc.Find(".mm-recipes-details__item").Each(func(i int, item *goquery.Selection) {
+				label := item.Find(".mm-recipes-details__label").Text()
+				value := item.Find(".mm-recipes-details__value").Text()
+
+				label = strings.ToLower(strings.TrimSpace(label))
+				value = strings.TrimSpace(value)
+
+				if strings.Contains(label, "servings") {
+					servings = value
+				} else if strings.Contains(label, "yield") {
+					servings = value
+				}
+			})
+		}
+	}
+
+	// If still not found, try schema.org approach
+	if servings == "" {
+		s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='recipeYield'], [itemscope] [itemprop='recipeYield']").Each(func(i int, item *goquery.Selection) {
+			if i == 0 {
+				servings = strings.TrimSpace(item.Text())
+				// Look for content attribute if text is empty
+				if servings == "" {
+					servings = item.AttrOr("content", "")
+				}
+			}
+		})
+	}
+
+	// Try LD+JSON schema for yield
+	if servings == "" {
+		s.doc.Find("script[type='application/ld+json']").Each(func(i int, item *goquery.Selection) {
+			scriptContent := item.Text()
+			if strings.Contains(scriptContent, "Recipe") {
+				// Try to parse the JSON
+				var jsonMap map[string]interface{}
+				if err := json.Unmarshal([]byte(scriptContent), &jsonMap); err == nil {
+					// Check if this is a Recipe
+					if jsonType, ok := jsonMap["@type"].(string); ok && (jsonType == "Recipe" || strings.Contains(jsonType, "Recipe")) {
+						// Try to get servings information
+						if yield, ok := jsonMap["recipeYield"].(string); ok {
+							servings = yield
+						} else if yield, ok := jsonMap["recipeYield"].([]interface{}); ok && len(yield) > 0 {
+							if yieldStr, ok := yield[0].(string); ok {
+								servings = yieldStr
+							}
+						} else if yield, ok := jsonMap["yield"].(string); ok {
+							servings = yield
+						}
+					}
+				} else {
+					// Fallback to regex
+					re := regexp.MustCompile(`"recipeYield"\s*:\s*"([^"]+)"`)
+					matches := re.FindStringSubmatch(scriptContent)
+					if len(matches) >= 2 {
+						servings = matches[1]
+					}
+				}
+			}
+		})
+	}
+
+	return servings
+}
+
 // GetRecipeImage extracts the recipe image URL
 func (s *Scraper) GetRecipeImage() string {
 	var image string
@@ -946,9 +1296,13 @@ func (s *Scraper) GetRecipeImage() string {
 				}
 			})
 		case strings.Contains(s.site, "allrecipes.com"):
-			s.doc.Find(".recipe-lead-media img, .lead-media img, .primary-media img").Each(func(i int, item *goquery.Selection) {
+			s.doc.Find(".recipe-lead-media img, .lead-media img, .primary-media img, .primary-image__image").Each(func(i int, item *goquery.Selection) {
 				if i == 0 {
 					image = item.AttrOr("src", "")
+					if image == "" {
+						// Some newer Allrecipes images use data-src
+						image = item.AttrOr("data-src", "")
+					}
 				}
 			})
 		case strings.Contains(s.site, "foodnetwork.com"):
@@ -990,12 +1344,24 @@ func (s *Scraper) GetRecipeImage() string {
 func (s *Scraper) GetRecipeName() string {
 	var name string
 
-	// Try schema.org recipe name
-	s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='name'], [itemscope] [itemprop='name']").Each(func(i int, item *goquery.Selection) {
-		if i == 0 {
-			name = strings.TrimSpace(item.Text())
-		}
-	})
+	switch {
+	case strings.Contains(s.site, "allrecipes.com"):
+		// Look for the recipe heading in both old and new Allrecipes formats
+		s.doc.Find(".recipe-heading h1, .article-heading, .headline, .recipe-title").Each(func(i int, item *goquery.Selection) {
+			if i == 0 {
+				name = strings.TrimSpace(item.Text())
+			}
+		})
+	}
+
+	// If still no name, try schema.org recipe name
+	if name == "" {
+		s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='name'], [itemscope] [itemprop='name']").Each(func(i int, item *goquery.Selection) {
+			if i == 0 {
+				name = strings.TrimSpace(item.Text())
+			}
+		})
+	}
 
 	// Try LD+JSON schema
 	if name == "" {
@@ -1058,165 +1424,6 @@ func (s *Scraper) GetRecipeName() string {
 	}
 
 	return name
-}
-
-// GetRecipeTime extracts prep and total time, then calculates cook time
-func (s *Scraper) GetRecipeTime() (string, string, string) {
-	var prepTime, cookTime, totalTime string
-
-	// Try schema.org timing information for prep time
-	s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='prepTime'], [itemscope] [itemprop='prepTime']").Each(func(i int, item *goquery.Selection) {
-		if i == 0 {
-			prepTime = item.AttrOr("content", "")
-			// Convert ISO duration to simple format if needed
-			if strings.HasPrefix(prepTime, "PT") {
-				prepTime = convertISODuration(prepTime)
-			} else if prepTime == "" {
-				prepTime = strings.TrimSpace(item.Text())
-			}
-		}
-	})
-
-	// Get total time
-	s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='totalTime'], [itemscope] [itemprop='totalTime']").Each(func(i int, item *goquery.Selection) {
-		if i == 0 {
-			totalTime = item.AttrOr("content", "")
-			// Convert ISO duration to simple format if needed
-			if strings.HasPrefix(totalTime, "PT") {
-				totalTime = convertISODuration(totalTime)
-			} else if totalTime == "" {
-				totalTime = strings.TrimSpace(item.Text())
-			}
-		}
-	})
-
-	// Try LD+JSON schema for times
-	if prepTime == "" || totalTime == "" {
-		s.doc.Find("script[type='application/ld+json']").Each(func(i int, item *goquery.Selection) {
-			scriptContent := item.Text()
-			if strings.Contains(scriptContent, "Recipe") {
-				// Try to parse the JSON
-				var jsonMap map[string]interface{}
-				if err := json.Unmarshal([]byte(scriptContent), &jsonMap); err == nil {
-					// Check if this is a Recipe
-					if jsonType, ok := jsonMap["@type"].(string); ok && (jsonType == "Recipe" || strings.Contains(jsonType, "Recipe")) {
-						if prepTime == "" {
-							if pt, ok := jsonMap["prepTime"].(string); ok {
-								prepTime = convertISODuration(pt)
-							}
-						}
-
-						if totalTime == "" {
-							if tt, ok := jsonMap["totalTime"].(string); ok {
-								totalTime = convertISODuration(tt)
-							}
-						}
-					}
-				} else {
-					// Fallback to regex
-					if prepTime == "" {
-						re := regexp.MustCompile(`"prepTime"\s*:\s*"([^"]+)"`)
-						matches := re.FindStringSubmatch(scriptContent)
-						if len(matches) >= 2 {
-							prepTime = convertISODuration(matches[1])
-						}
-					}
-
-					if totalTime == "" {
-						re := regexp.MustCompile(`"totalTime"\s*:\s*"([^"]+)"`)
-						matches := re.FindStringSubmatch(scriptContent)
-						if len(matches) >= 2 {
-							totalTime = convertISODuration(matches[1])
-						}
-					}
-				}
-			}
-		})
-	}
-
-	// Site-specific time extraction for Delish.com
-	if (prepTime == "" || totalTime == "") && strings.Contains(s.site, "delish.com") {
-		s.doc.Find(".recipe-info-item, .prep-info").Each(func(i int, item *goquery.Selection) {
-			text := strings.ToLower(item.Text())
-
-			if strings.Contains(text, "prep") && prepTime == "" {
-				prepTime = extractTime(text)
-			} else if strings.Contains(text, "total") && totalTime == "" {
-				totalTime = extractTime(text)
-			}
-		})
-	}
-
-	// Generic fallback for recipe time metadata
-	if prepTime == "" || totalTime == "" {
-		// Extract times based on common recipe site patterns
-		s.doc.Find(".recipe-meta-item, .recipe-meta, .recipe-details, .recipe-info").Each(func(i int, item *goquery.Selection) {
-			text := strings.ToLower(item.Text())
-			if strings.Contains(text, "prep") && prepTime == "" {
-				prepTime = extractTime(text)
-			} else if strings.Contains(text, "total") && totalTime == "" {
-				totalTime = extractTime(text)
-			}
-		})
-	}
-
-	// Calculate cook time based on prep time and total time
-	if prepTime != "" && totalTime != "" {
-		cookTime = calculateCookTime(prepTime, totalTime)
-	} else {
-		// If we can't calculate, try to extract it directly as a fallback
-		// Attempt to extract cook time from schema.org
-		s.doc.Find("[itemtype='http://schema.org/Recipe'] [itemprop='cookTime'], [itemscope] [itemprop='cookTime']").Each(func(i int, item *goquery.Selection) {
-			if i == 0 {
-				cookTime = item.AttrOr("content", "")
-				// Convert ISO duration to simple format if needed
-				if strings.HasPrefix(cookTime, "PT") {
-					cookTime = convertISODuration(cookTime)
-				} else if cookTime == "" {
-					cookTime = strings.TrimSpace(item.Text())
-				}
-			}
-		})
-
-		// If still not found, check JSON-LD
-		if cookTime == "" {
-			s.doc.Find("script[type='application/ld+json']").Each(func(i int, item *goquery.Selection) {
-				if cookTime != "" {
-					return
-				}
-
-				scriptContent := item.Text()
-				if strings.Contains(scriptContent, "Recipe") && strings.Contains(scriptContent, "cookTime") {
-					var jsonMap map[string]interface{}
-					if err := json.Unmarshal([]byte(scriptContent), &jsonMap); err == nil {
-						if jsonType, ok := jsonMap["@type"].(string); ok && (jsonType == "Recipe" || strings.Contains(jsonType, "Recipe")) {
-							if ct, ok := jsonMap["cookTime"].(string); ok {
-								cookTime = convertISODuration(ct)
-							}
-						}
-					} else {
-						re := regexp.MustCompile(`"cookTime"\s*:\s*"([^"]+)"`)
-						matches := re.FindStringSubmatch(scriptContent)
-						if len(matches) >= 2 {
-							cookTime = convertISODuration(matches[1])
-						}
-					}
-				}
-			})
-		}
-
-		// Generic fallback for cook time
-		if cookTime == "" {
-			s.doc.Find(".recipe-meta-item, .recipe-meta, .recipe-details, .recipe-info").Each(func(i int, item *goquery.Selection) {
-				text := strings.ToLower(item.Text())
-				if strings.Contains(text, "cook") && !strings.Contains(text, "prep") {
-					cookTime = extractTime(text)
-				}
-			})
-		}
-	}
-
-	return prepTime, cookTime, totalTime
 }
 
 // GetRecipeNutrition extracts calories and servings
