@@ -7,6 +7,7 @@ import (
 	"search-engine-indexer/src/elasticsearch"
 	"search-engine-indexer/src/logger"
 	"search-engine-indexer/src/scraper"
+	"search-engine-indexer/src/structs"
 	"sync"
 )
 
@@ -137,6 +138,47 @@ func deleteIndex() {
 	elasticsearch.DeleteIndex()
 }
 
+func getPopularRecipeSites() []string {
+	return []string{
+		"https://pinchofyum.com/recipes",
+		"https://minimalistbaker.com/recipes",
+		"https://cookieandkate.com/recipes",
+		"https://loveandlemons.com/recipes",
+		"https://smittenkitchen.com/recipes",
+		"https://seriouseats.com/recipes",
+		"https://halfbakedharvest.com/category/recipes",
+		"https://101cookbooks.com/recipes",
+		"https://food52.com/recipes",
+		"https://budgetbytes.com/category/recipes",
+		"https://thewoksoflife.com/recipes",
+	}
+}
+
+func startRecipeCrawling() {
+	checkIndexPresence()
+
+	var wg sync.WaitGroup
+	numberOfWorkers := 10
+
+	sites := getPopularRecipeSites()
+	fmt.Printf("Starting to crawl %d popular recipe sites...\n", len(sites))
+
+	// Send all recipe site URLs to the queue
+	for _, site := range sites {
+		go func(s string) {
+			queue <- s
+		}(site)
+	}
+
+	// Create worker pool with numberOfWorkers workers
+	wg.Add(numberOfWorkers)
+	for i := 1; i <= numberOfWorkers; i++ {
+		go worker(&wg, i)
+	}
+
+	wg.Wait()
+}
+
 func main() {
 	args := os.Args
 
@@ -146,14 +188,23 @@ func main() {
 		fmt.Println("1. If you want to crawl the internet:")
 		fmt.Println("\tgo run *.go index CRAWLING_START_URL")
 		fmt.Println()
-		fmt.Println("2. If you want to delete the pages index from elastic search:")
+		fmt.Println("2. If you want to crawl popular recipe sites:")
+		fmt.Println("\tgo run *.go recipes")
+		fmt.Println()
+		fmt.Println("3. If you want to delete the pages index from elastic search:")
 		fmt.Println("\tgo run *.go delete")
 		return
 	}
 
 	switch args[1] {
 	case "index":
+		if len(args) < 3 {
+			fmt.Println("Please provide a starting URL for crawling")
+			return
+		}
 		startCrawling(args[2])
+	case "recipes":
+		startRecipeCrawling()
 	case "delete":
 		deleteIndex()
 	}
