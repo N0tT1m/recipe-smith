@@ -267,13 +267,6 @@ func crawlURL(urlStr string, depth int) {
 	id, _ := shortid.Generate()
 
 	// More flexible data checks
-	// Original stringent check:
-	// hasMinimumData := recipeData["name"] != "" &&
-	//	(recipeData["ingredients"] != "" || strings.Contains(body, "ingredient")) &&
-	//	(recipeData["instructions"] != "" || strings.Contains(body, "direction") ||
-	//		strings.Contains(body, "instruction") || strings.Contains(body, "steps"))
-
-	// More flexible check:
 	hasName := recipeData["name"] != "" || title != ""
 	hasIngredients := recipeData["ingredients"] != "" ||
 		strings.Contains(body, "ingredient") ||
@@ -306,13 +299,11 @@ func crawlURL(urlStr string, depth int) {
 
 		// If we're missing ingredients, do a wider search in the HTML
 		if recipeData["ingredients"] == "" && hasIngredients {
-			// Already checked body contains "ingredient", so we'll accept this despite missing structured data
 			logger.WriteInfo(fmt.Sprintf("Ingredients text found in body for URL %s but not structured, proceeding anyway", urlStr))
 		}
 
 		// If we're missing instructions, do a wider search in the HTML
 		if recipeData["instructions"] == "" && hasInstructions {
-			// Already checked body contains instruction keywords, so we'll accept this despite missing structured data
 			logger.WriteInfo(fmt.Sprintf("Instructions text found in body for URL %s but not structured, proceeding anyway", urlStr))
 		}
 
@@ -336,12 +327,8 @@ func crawlURL(urlStr string, depth int) {
 
 		// Even if we skip storing this page, we still queue its links for crawling
 		for _, link := range links {
-			// Check if we've already queued this URL
 			if _, exists := queuedURLs.Load(link); !exists {
-				// Mark URL as queued
 				queuedURLs.Store(link, true)
-
-				// Add to crawl queue with incremented depth
 				go func(l string, d int) {
 					queue <- l
 				}(link, depth+1)
@@ -426,12 +413,8 @@ func crawlURL(urlStr string, depth int) {
 
 	// Queue new links for crawling
 	for _, link := range links {
-		// Check if we've already queued this URL
 		if _, exists := queuedURLs.Load(link); !exists {
-			// Mark URL as queued
 			queuedURLs.Store(link, true)
-
-			// Add to crawl queue with incremented depth
 			go func(l string, d int) {
 				queue <- l
 			}(link, depth+1)
@@ -563,11 +546,11 @@ func deleteIndex() {
 	elasticsearch.DeleteIndex()
 }
 
-<<<<<<< HEAD
+// getPopularRecipeSites returns URLs for popular recipe sites
 func getPopularRecipeSites() []string {
 	return []string{
 		"https://pinchofyum.com/recipes",
-		"https://minimalistbaker.com/recipes",
+		"https://minimalistbaker.com/recipes", 
 		"https://cookieandkate.com/recipes",
 		"https://loveandlemons.com/recipes",
 		"https://smittenkitchen.com/recipes",
@@ -577,37 +560,39 @@ func getPopularRecipeSites() []string {
 		"https://food52.com/recipes",
 		"https://budgetbytes.com/category/recipes",
 		"https://thewoksoflife.com/recipes",
+		"https://www.delish.com/cooking/recipe-ideas/",
+		"https://www.allrecipes.com/recipes/",
+		"https://www.foodnetwork.com/recipes",
+		"https://www.epicurious.com/recipes",
+		"https://www.simplyrecipes.com/recipes/",
 	}
 }
 
+// startRecipeCrawling starts crawling popular recipe sites
 func startRecipeCrawling() {
-	checkIndexPresence()
-
-	var wg sync.WaitGroup
-	numberOfWorkers := 10
-
 	sites := getPopularRecipeSites()
 	fmt.Printf("Starting to crawl %d popular recipe sites...\n", len(sites))
+	
+	logger.WriteInfo(fmt.Sprintf("Starting crawler with parameters:"))
+	logger.WriteInfo(fmt.Sprintf("  Workers: %d", concurrentWorkers))
+	logger.WriteInfo(fmt.Sprintf("  Max Depth: %d", maxCrawlDepth))
+	logger.WriteInfo(fmt.Sprintf("  Delay: %v", crawlDelayPerDomain))
+	logger.WriteInfo(fmt.Sprintf("  Max Requests Per Domain: %d", maxRequestsPerDomain))
+	logger.WriteInfo(fmt.Sprintf("  Debug Mode: %t", debugMode))
+	logger.WriteInfo(fmt.Sprintf("  Starting URLs: %v", sites))
 
-	// Send all recipe site URLs to the queue
-	for _, site := range sites {
-		go func(s string) {
-			queue <- s
-		}(site)
-	}
+	startCrawling(sites)
 
-	// Create worker pool with numberOfWorkers workers
-	wg.Add(numberOfWorkers)
-	for i := 1; i <= numberOfWorkers; i++ {
-		go worker(&wg, i)
-	}
-
-	wg.Wait()
+	// Print summary
+	var crawledCount int
+	crawledURLs.Range(func(_, _ interface{}) bool {
+		crawledCount++
+		return true
+	})
+	fmt.Printf("Crawling completed. Processed %d URLs.\n", crawledCount)
 }
 
-=======
 // main function handles command line arguments and starts the crawler
->>>>>>> 6d26aa9a75e420916d7aa3fa0179960e9d47d47a
 func main() {
 	args := os.Args
 
@@ -622,15 +607,9 @@ func main() {
 	if len(args) < 2 {
 		fmt.Println("Not option provided, please specify one of the options below:")
 		fmt.Println()
-		fmt.Println("1. If you want to crawl recipe sites:")
-		fmt.Println("\tgo run *.go index")
-		fmt.Println()
-<<<<<<< HEAD
-		fmt.Println("2. If you want to crawl popular recipe sites:")
+		fmt.Println("1. If you want to crawl popular recipe sites:")
 		fmt.Println("\tgo run *.go recipes")
 		fmt.Println()
-		fmt.Println("3. If you want to delete the pages index from elastic search:")
-=======
 		fmt.Println("2. If you want to crawl a specific recipe site:")
 		fmt.Println("\tgo run *.go index URL")
 		fmt.Println()
@@ -638,7 +617,6 @@ func main() {
 		fmt.Println("\tgo run *.go index URL -workers=20 -depth=5 -delay=2 -debug=true")
 		fmt.Println()
 		fmt.Println("4. If you want to delete the pages index from elastic search:")
->>>>>>> 6d26aa9a75e420916d7aa3fa0179960e9d47d47a
 		fmt.Println("\tgo run *.go delete")
 		fmt.Println()
 		fmt.Println("5. If you want to test a specific URL:")
@@ -665,24 +643,12 @@ func main() {
 	}
 
 	switch args[1] {
-	case "index":
-<<<<<<< HEAD
-		if len(args) < 3 {
-			fmt.Println("Please provide a starting URL for crawling")
-			return
-		}
-		startCrawling(args[2])
 	case "recipes":
 		startRecipeCrawling()
-=======
-		// List of popular recipe sites to start crawling
-		startURLs := []string{
-			"https://www.delish.com/cooking/recipe-ideas/",
-			"https://www.allrecipes.com/recipes/",
-			"https://www.foodnetwork.com/recipes",
-			"https://www.epicurious.com/recipes",
-			"https://www.simplyrecipes.com/recipes/",
-		}
+
+	case "index":
+		// Default to popular recipe sites if no URL provided
+		startURLs := getPopularRecipeSites()
 
 		// If URL is provided, use only that one
 		if len(args) >= 3 && !strings.HasPrefix(args[2], "-") {
@@ -711,7 +677,6 @@ func main() {
 		})
 		fmt.Printf("Crawling completed. Processed %d URLs.\n", crawledCount)
 
->>>>>>> 6d26aa9a75e420916d7aa3fa0179960e9d47d47a
 	case "delete":
 		deleteIndex()
 		fmt.Println("Index deleted successfully")
@@ -811,6 +776,6 @@ func main() {
 
 	default:
 		fmt.Println("Unknown option:", args[1])
-		fmt.Println("Valid options are: index, delete, test-url")
+		fmt.Println("Valid options are: recipes, index, delete, test-url")
 	}
 }
