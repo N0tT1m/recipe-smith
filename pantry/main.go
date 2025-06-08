@@ -694,11 +694,13 @@ func main() {
 		debugMode = true
 
 		// Create scraper
+		fmt.Println("Creating scraper...")
 		s := scraper.NewScraper(testURL)
 		if s == nil {
 			fmt.Println("Failed to create scraper")
 			return
 		}
+		fmt.Println("Scraper created successfully")
 
 		// Extract recipe data
 		recipeData := s.GetRecipeData()

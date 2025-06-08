@@ -1,8 +1,11 @@
 package scraper
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -109,15 +112,16 @@ var recipeSites = []RecipeSite{
 			"/recipe/",
 			"/recipes/",
 			"/blog/",
+			"/20", // Year-based URLs like /2025/06/recipe-name/
 		},
 		Selectors: SiteSelectors{
-			RecipeTitle:       "h1.entry-title, h1.recipe-title",
-			RecipeDescription: ".recipe-description, .entry-summary",
-			RecipeIngredients: ".recipe-ingredients li, .ingredients li",
-			RecipeInstructions: ".recipe-instructions li, .instructions li",
-			RecipeTime:        ".recipe-time, .prep-time, .cook-time",
-			RecipeServings:    ".recipe-servings, .servings",
-			RecipeLinks:       []string{"a[href*='/recipe/']", "a[href*='/recipes/']", "a[href*='/blog/']"},
+			RecipeTitle:       "h1.entry-title, h1.recipe-title, h1, .post-title",
+			RecipeDescription: ".recipe-description, .entry-summary, .entry-content p:first-of-type",
+			RecipeIngredients: ".recipe-ingredients li, .ingredients li, .entry-content p:contains('cup'), .entry-content p:contains('tablespoon'), .entry-content p:contains('teaspoon')",
+			RecipeInstructions: ".recipe-instructions li, .instructions li, .entry-content p:contains('mix'), .entry-content p:contains('combine'), .entry-content p:contains('heat')",
+			RecipeTime:        ".recipe-time, .prep-time, .cook-time, .entry-content p:contains('minute'), .entry-content p:contains('hour')",
+			RecipeServings:    ".recipe-servings, .servings, .entry-content p:contains('serve'), .entry-content p:contains('yield')",
+			RecipeLinks:       []string{"a[href*='/recipe/']", "a[href*='/recipes/']", "a[href*='/blog/']", "a[href*='/20']"},
 		},
 	},
 	{
@@ -175,12 +179,12 @@ var recipeSites = []RecipeSite{
 			"/recipes/",
 		},
 		Selectors: SiteSelectors{
-			RecipeTitle:       "h1.recipe-header-title, h1.recipe-title",
-			RecipeDescription: ".recipe-summary, .recipe-description",
-			RecipeIngredients: ".recipe-ingredients li, .ingredients li",
-			RecipeInstructions: ".recipe-instructions li, .instructions li",
-			RecipeTime:        ".recipe-time, .prep-time, .cook-time",
-			RecipeServings:    ".recipe-servings, .servings",
+			RecipeTitle:       "h1, .recipe-title, .recipe-header-title, [data-testid='recipe-title']",
+			RecipeDescription: ".recipe-summary, .recipe-description, .recipe-intro, .recipe-about, .intro",
+			RecipeIngredients: ".recipe-ingredients li, .ingredients li, .ingredient-list li, [data-testid='ingredient'], .recipe-ingredient",
+			RecipeInstructions: ".recipe-instructions li, .instructions li, .direction-list li, [data-testid='instruction'], .recipe-instruction, .recipe-method li",
+			RecipeTime:        ".recipe-time, .prep-time, .cook-time, .total-time, [data-testid='recipe-time']",
+			RecipeServings:    ".recipe-servings, .servings, .yield, [data-testid='servings']",
 			RecipeLinks:       []string{"a[href*='/recipe/']", "a[href*='/recipes/']"},
 		},
 	},
@@ -250,7 +254,7 @@ func isRecipeURL(u string, site *RecipeSite) bool {
 	return false
 }
 
-// NewScraper builds a new scraper for the website
+// NewScraper builds a new scraper for the website with retries and better error handling
 func NewScraper(u string) *Scraper {
 	if !strings.HasPrefix(u, "http") {
 		return nil
@@ -258,44 +262,112 @@ func NewScraper(u string) *Scraper {
 
 	// Add rate limiting and retries
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: 45 * time.Second,
 	}
 
-	req, err := http.NewRequest("GET", u, nil)
-	if err != nil {
-		log.Printf("Failed to create request for %s: %v", u, err)
-		return nil
+	// Try up to 3 times with exponential backoff
+	for attempt := 1; attempt <= 3; attempt++ {
+		req, err := http.NewRequest("GET", u, nil)
+		if err != nil {
+			log.Printf("Failed to create request for %s (attempt %d): %v", u, attempt, err)
+			if attempt == 3 {
+				return nil
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+
+		// Set more realistic headers
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+		req.Header.Set("Connection", "keep-alive")
+		req.Header.Set("Upgrade-Insecure-Requests", "1")
+
+		response, err := client.Do(req)
+		if err != nil {
+			log.Printf("Failed to fetch %s (attempt %d): %v", u, attempt, err)
+			if attempt == 3 {
+				return nil
+			}
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+			continue
+		}
+		defer response.Body.Close()
+
+		// Handle various status codes more gracefully
+		if response.StatusCode == 404 {
+			log.Printf("Page not found (404) for %s", u)
+			return nil
+		} else if response.StatusCode == 403 {
+			log.Printf("Access forbidden (403) for %s", u)
+			return nil
+		} else if response.StatusCode >= 500 {
+			log.Printf("Server error (%d) for %s (attempt %d)", response.StatusCode, u, attempt)
+			if attempt == 3 {
+				return nil
+			}
+			time.Sleep(time.Duration(attempt) * 3 * time.Second)
+			continue
+		} else if response.StatusCode != 200 {
+			log.Printf("Non-200 status code %d for %s", response.StatusCode, u)
+			return nil
+		}
+
+		// Successfully fetched page
+
+		// Read response body and handle compression
+		var reader io.Reader = response.Body
+		
+		// Check if response is gzipped and decompress if needed
+		if response.Header.Get("Content-Encoding") == "gzip" {
+			gzipReader, err := gzip.NewReader(response.Body)
+			if err != nil {
+				fmt.Printf("Failed to create gzip reader for %s (attempt %d): %v\n", u, attempt, err)
+				if attempt == 3 {
+					return nil
+				}
+				time.Sleep(time.Duration(attempt) * time.Second)
+				continue
+			}
+			defer gzipReader.Close()
+			reader = gzipReader
+		}
+		
+		bodyBytes, err := io.ReadAll(reader)
+		if err != nil {
+			fmt.Printf("Failed to read response body for %s (attempt %d): %v\n", u, attempt, err)
+			if attempt == 3 {
+				return nil
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+
+		// Response body read successfully
+
+		d, err := goquery.NewDocumentFromReader(bytes.NewReader(bodyBytes))
+		if err != nil {
+			log.Printf("Failed to parse HTML for %s (attempt %d): %v", u, attempt, err)
+			if attempt == 3 {
+				return nil
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+
+		site := getSiteConfig(u)
+
+		// HTML parsed successfully
+
+		return &Scraper{
+			url:  u,
+			doc:  d,
+			site: site,
+		}
 	}
 
-	// Set a realistic User-Agent
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; RecipeBot/1.0; +https://example.com/bot)")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-
-	response, err := client.Do(req)
-	if err != nil {
-		log.Printf("Failed to fetch %s: %v", u, err)
-		return nil
-	}
-	defer response.Body.Close()
-
-	if response.StatusCode != 200 {
-		log.Printf("Non-200 status code %d for %s", response.StatusCode, u)
-		return nil
-	}
-
-	d, err := goquery.NewDocumentFromReader(response.Body)
-	if err != nil {
-		log.Printf("Failed to parse HTML for %s: %v", u, err)
-		return nil
-	}
-
-	site := getSiteConfig(u)
-
-	return &Scraper{
-		url:  u,
-		doc:  d,
-		site: site,
-	}
+	return nil
 }
 
 // Body returns a string with the body of the page
@@ -791,6 +863,20 @@ func (s *Scraper) GetRecipeData() map[string]string {
 		data["name"] = data["title"]
 	}
 
+	// If we still don't have ingredients or instructions, try narrative extraction
+	// This is particularly useful for blog-style recipe sites like smittenkitchen.com
+	if (data["ingredients"] == "" || data["instructions"] == "") {
+		narrativeData := s.extractNarrativeRecipe()
+		
+		if data["ingredients"] == "" && narrativeData["ingredients"] != "" {
+			data["ingredients"] = narrativeData["ingredients"]
+		}
+		
+		if data["instructions"] == "" && narrativeData["instructions"] != "" {
+			data["instructions"] = narrativeData["instructions"]
+		}
+	}
+
 	return data
 }
 
@@ -804,14 +890,75 @@ func (s *Scraper) extractJSONLDRecipe() map[string]interface{} {
 		}
 
 		jsonText := sel.Text()
+		
+		// Clean up the JSON text to handle common formatting issues
+		jsonText = strings.TrimSpace(jsonText)
+		// Try to fix newlines in string literals (common issue with food52.com)
+		jsonText = strings.ReplaceAll(jsonText, "\n", "\\n")
+		jsonText = strings.ReplaceAll(jsonText, "\r", "\\r")
+		jsonText = strings.ReplaceAll(jsonText, "\t", "\\t")
+		
 		var data interface{}
 		
 		if err := json.Unmarshal([]byte(jsonText), &data); err != nil {
-			return
+			// Try once more with a simpler approach - remove all control characters
+			jsonTextSimple := regexp.MustCompile(`[\x00-\x1f\x7f]`).ReplaceAllString(sel.Text(), " ")
+			if err2 := json.Unmarshal([]byte(jsonTextSimple), &data); err2 != nil {
+				return
+			}
 		}
 
 		recipe = s.findRecipeInJSON(data)
 	})
 
 	return recipe
+}
+
+// extractNarrativeRecipe attempts to extract recipe data from narrative text for sites like smittenkitchen.com
+func (s *Scraper) extractNarrativeRecipe() map[string]string {
+	data := make(map[string]string)
+	bodyText := s.doc.Find(".entry-content, .post-content, .content").Text()
+	
+	// Try to extract ingredients from patterns
+	lines := strings.Split(bodyText, "\n")
+	var ingredients []string
+	var instructions []string
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		
+		// Look for ingredient patterns (measurements + ingredients)
+		if strings.Contains(line, "cup") || strings.Contains(line, "tablespoon") || 
+		   strings.Contains(line, "teaspoon") || strings.Contains(line, "pound") ||
+		   strings.Contains(line, "ounce") || strings.Contains(line, "gram") {
+			// This looks like an ingredient
+			if len(line) < 200 { // Reasonable ingredient length
+				ingredients = append(ingredients, line)
+			}
+		}
+		
+		// Look for instruction patterns
+		if strings.Contains(line, "mix") || strings.Contains(line, "combine") ||
+		   strings.Contains(line, "heat") || strings.Contains(line, "bake") ||
+		   strings.Contains(line, "cook") || strings.Contains(line, "add") ||
+		   strings.Contains(line, "stir") || strings.Contains(line, "pour") {
+			// This looks like an instruction
+			if len(line) > 20 && len(line) < 500 { // Reasonable instruction length
+				instructions = append(instructions, line)
+			}
+		}
+	}
+	
+	if len(ingredients) > 0 {
+		data["ingredients"] = strings.Join(ingredients, ";")
+	}
+	
+	if len(instructions) > 0 {
+		data["instructions"] = strings.Join(instructions, ";")
+	}
+	
+	return data
 }
